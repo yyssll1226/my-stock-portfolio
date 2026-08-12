@@ -1,0 +1,1186 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>持股管理系統</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- html2pdf.js CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    
+    <!-- Firebase SDK (Compat Version) -->
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        purpleTheme: {
+                            50: '#f7f3fb',   // 頁面背景
+                            100: '#e9daf3',  // 持股列網底 (淺柔紫)
+                            200: '#d9c0eb',  
+                            300: '#b894d8',  
+                            600: '#8c33d9',
+                            700: '#7522be',
+                            800: '#5e1a99',
+                            900: '#4a1c6d',  // 看板專用中深紫
+                            950: '#2c084d',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-purpleTheme-50 text-gray-800 min-h-screen p-4 md:p-6">
+
+    <div class="max-w-6xl mx-auto space-y-6">
+        
+        <!-- 標頭資訊 -->
+        <header class="bg-white rounded-xl shadow-sm p-6 border border-purpleTheme-100 flex flex-col items-center gap-4">
+            <h1 class="text-3xl font-bold text-purpleTheme-900 text-center tracking-wide">持股管理系統</h1>
+            
+            <div class="flex flex-wrap gap-3 justify-center items-center">
+                <!-- 登入狀態顯示區域 -->
+                <button id="auth-btn" onclick="handleAuthBtnClick()" class="bg-purpleTheme-800 hover:bg-purpleTheme-900 text-white px-3.5 py-1.5 rounded-lg text-xs font-medium transition shadow-sm">
+                    登入
+                </button>
+                <span id="user-info" class="text-xs text-gray-600 font-mono hidden"></span>
+
+                <button onclick="refreshPrices()" class="bg-purpleTheme-50 hover:bg-purpleTheme-100 text-purpleTheme-800 border border-purpleTheme-200 px-3.5 py-1.5 rounded-lg text-xs font-medium transition shadow-sm">
+                    ↻ 更新市價
+                </button>
+                <button onclick="exportPDF()" class="bg-purpleTheme-50 hover:bg-purpleTheme-100 text-purpleTheme-800 border border-purpleTheme-200 px-3.5 py-1.5 rounded-lg text-xs font-medium transition shadow-sm">
+                    下載今日報表
+                </button>
+            </div>
+        </header>
+
+        <!-- 導覽列 -->
+        <nav class="flex justify-center border-b border-purpleTheme-200 space-x-2">
+            <button id="tab-inventory-btn" onclick="switchTab('inventory')" class="py-2.5 px-6 md:px-8 font-semibold border-b-2 border-purpleTheme-700 text-purpleTheme-800 text-base md:text-lg transition-all">
+                庫存頁面
+            </button>
+            <button id="tab-details-btn" onclick="switchTab('details')" class="py-2.5 px-6 md:px-8 font-semibold border-b-2 border-transparent text-gray-500 hover:text-purpleTheme-700 text-base md:text-lg transition-all">
+                明細頁面
+            </button>
+            <button id="tab-market-btn" onclick="switchTab('market')" class="py-2.5 px-6 md:px-8 font-semibold border-b-2 border-transparent text-gray-500 hover:text-purpleTheme-700 text-base md:text-lg transition-all">
+                看盤頁面
+            </button>
+        </nav>
+
+        <!-- ================= 庫存頁面 ================= -->
+        <main id="tab-inventory" class="space-y-8">
+            <div id="pdf-date-header" class="hidden bg-white p-4 rounded-xl border border-purpleTheme-200 justify-between items-center mb-4">
+                <h2 class="text-2xl font-bold text-purpleTheme-900">持股庫存報表</h2>
+                <span id="pdf-export-date" class="text-sm font-semibold text-purpleTheme-800 font-mono"></span>
+            </div>
+
+            <!-- 帳戶一 -->
+            <div class="bg-white rounded-xl shadow-sm border border-purpleTheme-200 overflow-hidden">
+                <div class="bg-purpleTheme-900 text-white p-3.5 md:p-4 text-center">
+                    <h2 class="text-base md:text-lg font-bold text-center text-white">帳戶一</h2>
+                    <div class="mt-1.5 pt-1.5 border-t border-purpleTheme-700/60 flex justify-center flex-wrap gap-x-5 gap-y-1 text-sm text-center">
+                        <span>可用現金: <strong id="acc1-cash" class="text-yellow-300 font-mono">$0</strong></span>
+                        <span>股票市值: <strong id="acc1-market" class="text-cyan-300 font-mono">$0</strong></span>
+                        <span>總資產: <strong id="acc1-total" class="text-white font-bold font-mono">$0</strong></span>
+                        <span>未實現損益: <span id="acc1-pnl" class="font-mono font-bold">+$0 (0.00%)</span></span>
+                    </div>
+                </div>
+
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="bg-purpleTheme-50 text-purpleTheme-900 font-bold text-xs uppercase border-b border-purpleTheme-200 select-none">
+                                <th class="py-2.5 px-4 w-12 text-center cursor-pointer hover:bg-purpleTheme-100/80 transition" onclick="toggleAccountExpand(1)" title="點擊全開/全收">展開</th>
+                                <th class="py-2.5 px-4 cursor-pointer hover:bg-purpleTheme-100/80 transition" onclick="toggleAccountExpand(1)" title="點擊展開/折疊帳戶一所有批次明細">
+                                    名稱
+                                </th>
+                                <th class="py-2.5 px-4 text-right">市價</th>
+                                <th class="py-2.5 px-4 text-right">買進均價</th>
+                                <th class="py-2.5 px-4 text-right">持有股數</th>
+                                <th class="py-2.5 px-4 text-right">未實現損益</th>
+                            </tr>
+                        </thead>
+                        <tbody id="acc1-inventory-list"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 帳戶二 -->
+            <div class="bg-white rounded-xl shadow-sm border border-purpleTheme-200 overflow-hidden">
+                <div class="bg-purpleTheme-900 text-white p-3.5 md:p-4 text-center">
+                    <h2 class="text-base md:text-lg font-bold text-center text-white">帳戶二</h2>
+                    <div class="mt-1.5 pt-1.5 border-t border-purpleTheme-700/60 flex justify-center flex-wrap gap-x-5 gap-y-1 text-sm text-center">
+                        <span>可用現金: <strong id="acc2-cash" class="text-yellow-300 font-mono">$0</strong></span>
+                        <span>股票市值: <strong id="acc2-market" class="text-cyan-300 font-mono">$0</strong></span>
+                        <span>總資產: <strong id="acc2-total" class="text-white font-bold font-mono">$0</strong></span>
+                        <span>未實現損益: <span id="acc2-pnl" class="font-mono font-bold">+$0 (0.00%)</span></span>
+                    </div>
+                </div>
+
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="bg-purpleTheme-50 text-purpleTheme-900 font-bold text-xs uppercase border-b border-purpleTheme-200 select-none">
+                                <th class="py-2.5 px-4 w-12 text-center cursor-pointer hover:bg-purpleTheme-100/80 transition" onclick="toggleAccountExpand(2)" title="點擊全開/全收">展開</th>
+                                <th class="py-2.5 px-4 cursor-pointer hover:bg-purpleTheme-100/80 transition" onclick="toggleAccountExpand(2)" title="點擊展開/折疊帳戶二所有批次明細">
+                                    名稱
+                                </th>
+                                <th class="py-2.5 px-4 text-right">市價</th>
+                                <th class="py-2.5 px-4 text-right">買進均價</th>
+                                <th class="py-2.5 px-4 text-right">持有股數</th>
+                                <th class="py-2.5 px-4 text-right">未實現損益</th>
+                            </tr>
+                        </thead>
+                        <tbody id="acc2-inventory-list"></tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+
+        <!-- ================= 明細頁面 ================= -->
+        <main id="tab-details" class="hidden space-y-6">
+            <!-- 新增/修改表單 -->
+            <div class="bg-white rounded-xl shadow-sm border border-purpleTheme-100 overflow-hidden">
+                <div class="bg-purpleTheme-900 text-white px-5 py-3">
+                    <h2 id="form-title" class="text-base font-bold">新增交易紀錄</h2>
+                </div>
+
+                <form id="trade-form" onsubmit="handleFormSubmit(event)" class="p-6 grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                    <input type="hidden" id="edit-id" value="">
+                    
+                    <div>
+                        <label class="block text-xs font-semibold text-gray-600 mb-1">帳戶別</label>
+                        <select id="form-account" class="w-full border border-gray-300 p-2 rounded-lg text-sm focus:border-purpleTheme-600 focus:outline-none" required>
+                            <option value="帳戶一">帳戶一</option>
+                            <option value="帳戶二">帳戶二</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-semibold text-gray-600 mb-1">交易類型</label>
+                        <select id="form-type" onchange="toggleFormFields()" class="w-full border border-gray-300 p-2 rounded-lg text-sm focus:border-purpleTheme-600 focus:outline-none" required>
+                            <option value="BUY">買進</option>
+                            <option value="SELL">賣出</option>
+                            <option value="DIVIDEND">配息</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-semibold text-gray-600 mb-1">日期</label>
+                        <input type="date" id="form-date" class="w-full border border-gray-300 p-2 rounded-lg text-sm focus:border-purpleTheme-600 focus:outline-none" required>
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-semibold text-gray-600 mb-1">ETF標的</label>
+                        <select id="form-stock" class="w-full border border-gray-300 p-2 rounded-lg text-sm focus:border-purpleTheme-600 focus:outline-none" required>
+                            <option value="00980A">00980A - 主動野村臺灣優選</option>
+                            <option value="00981A">00981A - 主動統一台股增長</option>
+                            <option value="00982A">00982A - 主動群益台灣強棒</option>
+                        </select>
+                    </div>
+
+                    <div id="field-price">
+                        <label class="block text-xs font-semibold text-gray-600 mb-1">價格 (元)</label>
+                        <input type="number" step="0.01" id="form-price" oninput="calcFees()" class="w-full border border-gray-300 p-2 rounded-lg text-sm focus:border-purpleTheme-600 focus:outline-none" placeholder="0.00">
+                    </div>
+
+                    <div id="field-shares">
+                        <label class="block text-xs font-semibold text-gray-600 mb-1">股數</label>
+                        <input type="number" id="form-shares" oninput="calcFees()" class="w-full border border-gray-300 p-2 rounded-lg text-sm focus:border-purpleTheme-600 focus:outline-none" placeholder="1000">
+                    </div>
+
+                    <div id="field-fee">
+                        <label class="block text-xs font-semibold text-gray-600 mb-1">手續費 (元)</label>
+                        <input type="number" id="form-fee" class="w-full border border-gray-300 p-2 rounded-lg text-sm focus:border-purpleTheme-600 focus:outline-none" value="0">
+                    </div>
+
+                    <div id="field-tax">
+                        <label class="block text-xs font-semibold text-gray-600 mb-1">證交稅 (元)</label>
+                        <input type="number" id="form-tax" class="w-full border border-gray-300 p-2 rounded-lg text-sm focus:border-purpleTheme-600 focus:outline-none transition-colors" value="0">
+                    </div>
+
+                    <div id="field-dividend-amount" class="hidden">
+                        <label class="block text-xs font-semibold text-gray-600 mb-1">配息總金額 (元)</label>
+                        <input type="number" id="form-dividend" class="w-full border border-gray-300 p-2 rounded-lg text-sm focus:border-purpleTheme-600 focus:outline-none" placeholder="0">
+                    </div>
+
+                    <div class="md:col-span-3 lg:col-span-4 flex justify-end gap-2 mt-2">
+                        <button type="button" onclick="resetForm()" class="px-4 py-2 bg-gray-100 text-gray-600 rounded-lg text-sm hover:bg-gray-200">清空/取消</button>
+                        <button type="submit" class="px-6 py-2 bg-purpleTheme-800 text-white rounded-lg text-sm hover:bg-purpleTheme-900 font-medium transition shadow-sm">儲存交易紀錄</button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- 明細列表 -->
+            <div class="bg-white rounded-xl shadow-sm border border-purpleTheme-100 overflow-hidden">
+                <div class="px-5 py-3 bg-purpleTheme-900 text-white flex justify-between items-center">
+                    <h2 class="text-base font-bold">歷史交易明細</h2>
+                    <button id="reset-filter-btn" onclick="clearFilters()" class="hidden text-xs text-purpleTheme-200 hover:text-white underline font-semibold">
+                        重設篩選條件
+                    </button>
+                </div>
+
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="bg-purpleTheme-100/80 text-gray-800 text-xs font-bold border-b border-purpleTheme-200">
+                                <th class="py-2.5 px-4">
+                                    <span class="inline-flex items-center gap-1">
+                                        日期
+                                        <input type="date" id="filter-date" onchange="renderTransactions()" title="依日期篩選" class="bg-transparent text-[11px] w-4 h-4 cursor-pointer border-none p-0 focus:outline-none">
+                                    </span>
+                                </th>
+                                <th class="py-2.5 px-4">
+                                    <select id="filter-account" onchange="renderTransactions()" class="bg-transparent font-bold cursor-pointer hover:text-purpleTheme-700 focus:outline-none">
+                                        <option value="">帳戶 ▾</option>
+                                        <option value="帳戶一">帳戶一</option>
+                                        <option value="帳戶二">帳戶二</option>
+                                    </select>
+                                </th>
+                                <th class="py-2.5 px-4">
+                                    <select id="filter-type" onchange="renderTransactions()" class="bg-transparent font-bold cursor-pointer hover:text-purpleTheme-700 focus:outline-none">
+                                        <option value="">類型 ▾</option>
+                                        <option value="BUY">買進</option>
+                                        <option value="SELL">賣出</option>
+                                        <option value="DIVIDEND">配息</option>
+                                    </select>
+                                </th>
+                                <th class="py-2.5 px-4">
+                                    <select id="filter-stock" onchange="renderTransactions()" class="bg-transparent font-bold cursor-pointer hover:text-purpleTheme-700 focus:outline-none">
+                                        <option value="">ETF名稱 ▾</option>
+                                        <option value="00980A">00980A - 野村</option>
+                                        <option value="00981A">00981A - 統一</option>
+                                        <option value="00982A">00982A - 群益</option>
+                                    </select>
+                                </th>
+                                <th class="py-2.5 px-4 text-right">單價 / 配息</th>
+                                <th class="py-2.5 px-4 text-right">股數</th>
+                                <th class="py-2.5 px-4 text-right">手續費/稅</th>
+                                <th class="py-2.5 px-4 text-right">應收付/總淨額</th>
+                                <th class="py-2.5 px-4 text-center">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="transaction-list"></tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+
+        <!-- ================= 看盤頁面 ================= -->
+        <main id="tab-market" class="hidden space-y-6">
+            <!-- 第一行：大盤與指數 -->
+            <div>
+                <h3 class="text-sm font-bold text-purpleTheme-900 mb-3 flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-purpleTheme-600 inline-block"></span>
+                    大盤指數
+                </h3>
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4" id="index-cards">
+                    <!-- JS 動態渲染大盤指數 -->
+                </div>
+            </div>
+
+            <!-- 第二行：三檔自選 ETF -->
+            <div>
+                <h3 class="text-sm font-bold text-purpleTheme-900 mb-3 flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-purpleTheme-600 inline-block"></span>
+                    自選 ETF 標的
+                </h3>
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4" id="etf-cards">
+                    <!-- JS 動態渲染 ETF 行情 -->
+                </div>
+            </div>
+        </main>
+
+    </div>
+
+    <!-- ================= Email/密碼 登入彈出視窗 ================= -->
+    <div id="auth-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm hidden flex items-center justify-center p-4 z-50">
+        <div class="bg-white rounded-2xl shadow-xl border border-purpleTheme-100 max-w-sm w-full overflow-hidden">
+            <div class="bg-purpleTheme-900 text-white p-4 text-center relative">
+                <h3 id="modal-title" class="text-lg font-bold">帳號登入</h3>
+                <button onclick="closeAuthModal()" class="absolute right-4 top-4 text-purpleTheme-200 hover:text-white">✕</button>
+            </div>
+
+            <form onsubmit="handleAuthSubmit(event)" class="p-6 space-y-4">
+                <div>
+                    <label class="block text-xs font-semibold text-gray-600 mb-1">Email 帳號</label>
+                    <input type="email" id="auth-email" class="w-full border border-gray-300 p-2.5 rounded-lg text-sm focus:border-purpleTheme-600 focus:outline-none" placeholder="name@example.com" required>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-semibold text-gray-600 mb-1">密碼</label>
+                    <input type="password" id="auth-password" class="w-full border border-gray-300 p-2.5 rounded-lg text-sm focus:border-purpleTheme-600 focus:outline-none" placeholder="••••••••" minlength="6" required>
+                </div>
+
+                <button type="submit" id="modal-submit-btn" class="w-full py-2.5 bg-purpleTheme-800 text-white rounded-lg text-sm font-semibold hover:bg-purpleTheme-900 transition shadow">
+                    登入
+                </button>
+
+                <div class="text-center pt-2">
+                    <button type="button" onclick="toggleAuthMode()" id="modal-toggle-btn" class="text-xs text-purpleTheme-700 hover:text-purpleTheme-900 font-medium">
+                        還沒有帳號？點此免費註冊
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        // ================= 1. FIREBASE 配置 =================
+        const firebaseConfig = {
+            apiKey: "AIzaSyCWwMJeQqCMJMplHuMElhTKwTjr45fi54I",
+            authDomain: "stock-portfolio-1db80.firebaseapp.com",
+            projectId: "stock-portfolio-1db80",
+            storageBucket: "stock-portfolio-1db80.firebasestorage.app",
+            messagingSenderId: "474309096094",
+            appId: "1:474309096094:web:ac838b72b1aa1015de818f"
+        };
+
+        firebase.initializeApp(firebaseConfig);
+        const auth = firebase.auth();
+        const db = firebase.firestore();
+
+        let currentUser = null;
+        let unsubscribeFirestore = null;
+        let isRegisterMode = false;
+
+        auth.onAuthStateChanged(user => {
+            currentUser = user;
+            const authBtn = document.getElementById('auth-btn');
+            const userInfo = document.getElementById('user-info');
+
+            if (user) {
+                authBtn.innerText = "登出";
+                userInfo.innerText = user.email;
+                userInfo.classList.remove('hidden');
+                syncCloudData();
+            } else {
+                authBtn.innerText = "登入";
+                userInfo.classList.add('hidden');
+                if (unsubscribeFirestore) unsubscribeFirestore();
+                
+                loadLocalData();
+                renderAll();
+            }
+        });
+
+        function handleAuthBtnClick() {
+            if (currentUser) {
+                auth.signOut();
+            } else {
+                openAuthModal();
+            }
+        }
+
+        function openAuthModal() {
+            isRegisterMode = false;
+            updateModalUI();
+            document.getElementById('auth-modal').classList.remove('hidden');
+        }
+
+        function closeAuthModal() {
+            document.getElementById('auth-modal').classList.add('hidden');
+            document.getElementById('auth-email').value = '';
+            document.getElementById('auth-password').value = '';
+        }
+
+        function toggleAuthMode() {
+            isRegisterMode = !isRegisterMode;
+            updateModalUI();
+        }
+
+        function updateModalUI() {
+            document.getElementById('modal-title').innerText = isRegisterMode ? "註冊新帳號" : "帳號登入";
+            document.getElementById('modal-submit-btn').innerText = isRegisterMode ? "建立帳號並登入" : "登入";
+            document.getElementById('modal-toggle-btn').innerText = isRegisterMode ? "已有帳號？點此登入" : "還沒有帳號？點此免費註冊";
+        }
+
+        function handleAuthSubmit(e) {
+            e.preventDefault();
+            const email = document.getElementById('auth-email').value;
+            const password = document.getElementById('auth-password').value;
+
+            if (isRegisterMode) {
+                auth.createUserWithEmailAndPassword(email, password)
+                    .then(() => {
+                        alert("註冊成功！已為您自動登入。");
+                        closeAuthModal();
+                    })
+                    .catch(err => alert("註冊失敗：" + translateAuthError(err.code)));
+            } else {
+                auth.signInWithEmailAndPassword(email, password)
+                    .then(() => {
+                        closeAuthModal();
+                    })
+                    .catch(err => alert("登入失敗：" + translateAuthError(err.code)));
+            }
+        }
+
+        function translateAuthError(code) {
+            switch(code) {
+                case 'auth/invalid-email': return 'Email 格式不正確';
+                case 'auth/user-not-found': return '找不到此帳號，請確認 Email 或先註冊';
+                case 'auth/wrong-password': return '密碼錯誤，請重新輸入';
+                case 'auth/email-already-in-use': return '此 Email 已被註冊使用';
+                case 'auth/weak-password': return '密碼太弱，長度至少需 6 個字元';
+                default: return '請檢查輸入的帳號密碼。';
+            }
+        }
+
+        function syncCloudData() {
+            if (!currentUser) return;
+
+            const userDocRef = db.collection('users').doc(currentUser.uid);
+            
+            unsubscribeFirestore = userDocRef.onSnapshot(doc => {
+                if (doc.exists && doc.data().transactions) {
+                    transactions = doc.data().transactions;
+                } else {
+                    transactions = [];
+                }
+                saveLocalData();
+                renderAll();
+            }, err => {
+                console.error("雲端同步錯誤：", err);
+            });
+        }
+
+        function saveCloudData() {
+            if (currentUser) {
+                db.collection('users').doc(currentUser.uid).set({
+                    transactions: transactions,
+                    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+                }, { merge: true });
+            }
+        }
+
+        // ================= 2. 業務邏輯與畫面渲染 =================
+        const STOCKS = {
+            '00980A': '主動野村臺灣優選',
+            '00981A': '主動統一台股增長',
+            '00982A': '主動群益台灣強棒'
+        };
+
+        // 初始狀態：全數預設為 null，未取得成功前堅持顯示 --，絕不呈現任何假數字
+        let stockPrices = {
+            '00980A': { price: null, change: null, pct: null },
+            '00981A': { price: null, change: null, pct: null },
+            '00982A': { price: null, change: null, pct: null }
+        };
+
+        let indexMarketData = {
+            'TAIEX': { name: '加權指數', price: null, change: null, pct: null },
+            'TX': { name: '台指期', price: null, change: null, pct: null },
+            'TWO': { name: '櫃買指數', price: null, change: null, pct: null }
+        };
+
+        const STORAGE_KEY = 'STOCK_PORTFOLIO_DATA';
+        let transactions = [];
+
+        window.onload = () => {
+            document.getElementById('form-date').valueAsDate = new Date();
+            fetchAllMarketData();
+            toggleFormFields();
+        };
+
+        function switchTab(tab) {
+            const invTab = document.getElementById('tab-inventory');
+            const detTab = document.getElementById('tab-details');
+            const mktTab = document.getElementById('tab-market');
+            
+            const invBtn = document.getElementById('tab-inventory-btn');
+            const detBtn = document.getElementById('tab-details-btn');
+            const mktBtn = document.getElementById('tab-market-btn');
+
+            invTab.classList.add('hidden');
+            detTab.classList.add('hidden');
+            mktTab.classList.add('hidden');
+
+            invBtn.className = "py-2.5 px-6 md:px-8 font-semibold border-b-2 border-transparent text-gray-500 hover:text-purpleTheme-700 text-base md:text-lg transition-all";
+            detBtn.className = "py-2.5 px-6 md:px-8 font-semibold border-b-2 border-transparent text-gray-500 hover:text-purpleTheme-700 text-base md:text-lg transition-all";
+            mktBtn.className = "py-2.5 px-6 md:px-8 font-semibold border-b-2 border-transparent text-gray-500 hover:text-purpleTheme-700 text-base md:text-lg transition-all";
+
+            if (tab === 'inventory') {
+                invTab.classList.remove('hidden');
+                invBtn.className = "py-2.5 px-6 md:px-8 font-semibold border-b-2 border-purpleTheme-700 text-purpleTheme-800 text-base md:text-lg transition-all";
+            } else if (tab === 'details') {
+                detTab.classList.remove('hidden');
+                detBtn.className = "py-2.5 px-6 md:px-8 font-semibold border-b-2 border-purpleTheme-700 text-purpleTheme-800 text-base md:text-lg transition-all";
+            } else if (tab === 'market') {
+                mktTab.classList.remove('hidden');
+                mktBtn.className = "py-2.5 px-6 md:px-8 font-semibold border-b-2 border-purpleTheme-700 text-purpleTheme-800 text-base md:text-lg transition-all";
+                renderMarketWatch();
+            }
+        }
+
+        function fetchAllMarketData() {
+            fetchStockPrices();
+            fetchIndexPrices();
+        }
+
+        // 直連 FinMind 官方 API (原生支援 CORS 跨域，不需經任何第三方代理)
+        async function fetchStockPrices() {
+            const keys = Object.keys(STOCKS);
+            const today = new Date();
+            const startDate = new Date(today.setDate(today.getDate() - 30)).toISOString().split('T')[0];
+
+            for (let code of keys) {
+                try {
+                    const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${code}&start_date=${startDate}`;
+                    const res = await fetch(url);
+                    if (!res.ok) continue;
+
+                    const data = await res.json();
+                    if (data.data && data.data.length > 0) {
+                        const len = data.data.length;
+                        const latest = data.data[len - 1];
+                        const price = parseFloat(latest.close || 0);
+                        let prevPrice = price;
+                        if (len >= 2) prevPrice = parseFloat(data.data[len - 2].close || price);
+
+                        const change = price - prevPrice;
+                        const pct = prevPrice > 0 ? (change / prevPrice) * 100 : 0;
+
+                        if (price > 0) {
+                            stockPrices[code] = { price, change, pct };
+                        }
+                    }
+                } catch (e) {
+                    console.error(`FinMind 抓取 ${code} 失敗：`, e);
+                }
+            }
+            renderInventory();
+            renderMarketWatch();
+        }
+
+        // 直連 FinMind 官方 API - 大盤與指數 (原生支援 CORS)
+        async function fetchIndexPrices() {
+            const today = new Date();
+            const startDate = new Date(today.setDate(today.getDate() - 30)).toISOString().split('T')[0];
+
+            // 1. 加權指數 (001) 與 櫃買指數 (101)
+            const indices = [
+                { id: '001', key: 'TAIEX', name: '加權指數' },
+                { id: '101', key: 'TWO', name: '櫃買指數' }
+            ];
+
+            for (let idx of indices) {
+                try {
+                    const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${idx.id}&start_date=${startDate}`;
+                    const res = await fetch(url);
+                    if (!res.ok) continue;
+
+                    const data = await res.json();
+                    if (data.data && data.data.length > 0) {
+                        const len = data.data.length;
+                        const latest = data.data[len - 1];
+                        const price = parseFloat(latest.close || 0);
+                        let prevPrice = price;
+                        if (len >= 2) prevPrice = parseFloat(data.data[len - 2].close || price);
+
+                        const change = price - prevPrice;
+                        const pct = prevPrice > 0 ? (change / prevPrice) * 100 : 0;
+
+                        if (price > 0) {
+                            indexMarketData[idx.key] = { name: idx.name, price, change, pct };
+                        }
+                    }
+                } catch (e) {
+                    console.error(`FinMind 抓取 ${idx.key} 失敗：`, e);
+                }
+            }
+
+            // 2. 台指期 (TX) - 抓取近月真實點數 (>10000 點)
+            try {
+                const futUrl = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanFuturesDaily&data_id=TX&start_date=${startDate}`;
+                const res = await fetch(futUrl);
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.data && data.data.length > 0) {
+                        const txData = data.data.filter(d => (d.close || d.settlement_price) && parseFloat(d.close || d.settlement_price) > 10000);
+                        if (txData.length > 0) {
+                            const len = txData.length;
+                            const latest = txData[len - 1];
+                            const price = parseFloat(latest.close || latest.settlement_price || 0);
+                            let prevPrice = price;
+                            if (len >= 2) prevPrice = parseFloat(txData[len - 2].close || txData[len - 2].settlement_price || price);
+
+                            const change = price - prevPrice;
+                            const pct = prevPrice > 0 ? (change / prevPrice) * 100 : 0;
+
+                            if (price > 0) {
+                                indexMarketData['TX'] = { name: '台指期', price, change, pct };
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error("FinMind 抓取 台指期 失敗：", e);
+            }
+
+            renderMarketWatch();
+        }
+
+        function refreshPrices() {
+            fetchStockPrices();
+            fetchIndexPrices();
+        }
+
+        function toggleFormFields() {
+            const type = document.getElementById('form-type').value;
+            const priceField = document.getElementById('field-price');
+            const sharesField = document.getElementById('field-shares');
+            const feeField = document.getElementById('field-fee');
+            const taxField = document.getElementById('field-tax');
+            const taxInput = document.getElementById('form-tax');
+            const divField = document.getElementById('field-dividend-amount');
+
+            if (type === 'DIVIDEND') {
+                priceField.classList.add('hidden');
+                sharesField.classList.add('hidden');
+                feeField.classList.add('hidden');
+                taxField.classList.add('hidden');
+                divField.classList.remove('hidden');
+            } else {
+                priceField.classList.remove('hidden');
+                sharesField.classList.remove('hidden');
+                feeField.classList.remove('hidden');
+                taxField.classList.remove('hidden');
+                divField.classList.add('hidden');
+
+                if (type === 'BUY') {
+                    taxInput.value = 0;
+                    taxInput.disabled = true;
+                    taxInput.classList.add('bg-gray-100', 'cursor-not-allowed');
+                } else {
+                    taxInput.disabled = false;
+                    taxInput.classList.remove('bg-gray-100', 'cursor-not-allowed');
+                }
+            }
+            calcFees();
+        }
+
+        function calcFees() {
+            const type = document.getElementById('form-type').value;
+            if (type === 'DIVIDEND') return;
+
+            const price = parseFloat(document.getElementById('form-price').value) || 0;
+            const shares = parseInt(document.getElementById('form-shares').value) || 0;
+            const amount = price * shares;
+
+            let fee = Math.round(amount * 0.0008115);
+            let tax = 0;
+            if (type === 'SELL') {
+                tax = Math.round(amount * 0.001);
+            }
+
+            document.getElementById('form-fee').value = fee;
+            if (type === 'SELL') {
+                document.getElementById('form-tax').value = tax;
+            }
+        }
+
+        function handleFormSubmit(e) {
+            e.preventDefault();
+            const editId = document.getElementById('edit-id').value;
+            const account = document.getElementById('form-account').value;
+            const type = document.getElementById('form-type').value;
+            const date = document.getElementById('form-date').value;
+            const stock = document.getElementById('form-stock').value;
+
+            let price = 0, shares = 0, fee = 0, tax = 0, netAmount = 0;
+
+            if (type === 'DIVIDEND') {
+                netAmount = parseFloat(document.getElementById('form-dividend').value) || 0;
+            } else {
+                price = parseFloat(document.getElementById('form-price').value) || 0;
+                shares = parseInt(document.getElementById('form-shares').value) || 0;
+                fee = parseFloat(document.getElementById('form-fee').value) || 0;
+                tax = (type === 'SELL') ? (parseFloat(document.getElementById('form-tax').value) || 0) : 0;
+
+                const tradeTotal = price * shares;
+                if (type === 'BUY') {
+                    netAmount = -(tradeTotal + fee);
+                } else if (type === 'SELL') {
+                    netAmount = tradeTotal - fee - tax;
+                }
+            }
+
+            const record = {
+                id: editId ? parseInt(editId) : Date.now(),
+                account,
+                type,
+                date,
+                stock,
+                price,
+                shares,
+                fee,
+                tax,
+                netAmount
+            };
+
+            if (editId) {
+                const index = transactions.findIndex(t => t.id === record.id);
+                if (index !== -1) transactions[index] = record;
+            } else {
+                transactions.push(record);
+            }
+
+            saveLocalData();
+            saveCloudData();
+            resetForm();
+            renderAll();
+        }
+
+        function resetForm() {
+            document.getElementById('trade-form').reset();
+            document.getElementById('edit-id').value = '';
+            document.getElementById('form-title').innerText = '新增交易紀錄';
+            document.getElementById('form-date').valueAsDate = new Date();
+            toggleFormFields();
+        }
+
+        function editTransaction(id) {
+            const t = transactions.find(item => item.id === id);
+            if (!t) return;
+
+            document.getElementById('edit-id').value = t.id;
+            document.getElementById('form-account').value = t.account;
+            document.getElementById('form-type').value = t.type;
+            document.getElementById('form-date').value = t.date;
+            document.getElementById('form-stock').value = t.stock;
+            
+            toggleFormFields();
+
+            if (t.type === 'DIVIDEND') {
+                document.getElementById('form-dividend').value = t.netAmount;
+            } else {
+                document.getElementById('form-price').value = t.price;
+                document.getElementById('form-shares').value = t.shares;
+                document.getElementById('form-fee').value = t.fee;
+                document.getElementById('form-tax').value = t.tax;
+            }
+
+            document.getElementById('form-title').innerText = '修改交易紀錄';
+            switchTab('details');
+        }
+
+        function deleteTransaction(id) {
+            if (confirm('確定要刪除這筆交易紀錄嗎？')) {
+                transactions = transactions.filter(t => t.id !== id);
+                saveLocalData();
+                saveCloudData();
+                renderAll();
+            }
+        }
+
+        function calculatePortfolio(accountName) {
+            const INITIAL_CAPITAL = 200000;
+            let cash = INITIAL_CAPITAL;
+            let holdings = {};
+
+            const accTrans = transactions
+                .filter(t => t.account === accountName)
+                .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+            accTrans.forEach(t => {
+                cash += t.netAmount;
+
+                if (t.type === 'BUY' || t.type === 'SELL') {
+                    if (!holdings[t.stock]) {
+                        holdings[t.stock] = { shares: 0, totalCost: 0, buys: [] };
+                    }
+                    const h = holdings[t.stock];
+
+                    if (t.type === 'BUY') {
+                        const totalBuyCost = (t.price * t.shares) + t.fee;
+                        h.shares += t.shares;
+                        h.totalCost += totalBuyCost;
+                        h.buys.push({
+                            id: t.id,
+                            date: t.date,
+                            price: t.price,
+                            shares: t.shares,
+                            fee: t.fee,
+                        });
+                    } else if (t.type === 'SELL') {
+                        if (h.shares > 0) {
+                            const costPerShare = h.totalCost / h.shares;
+                            h.shares -= t.shares;
+                            h.totalCost -= (costPerShare * t.shares);
+                        }
+                    }
+                }
+            });
+
+            return { cash, holdings };
+        }
+
+        function renderAll() {
+            renderInventory();
+            renderTransactions();
+            renderMarketWatch();
+        }
+
+        function toggleAccountExpand(accIdx) {
+            const rows = document.querySelectorAll(`[id^="expand-${accIdx}-"]`);
+            if (!rows || rows.length === 0) return;
+
+            let isAnyHidden = false;
+            rows.forEach(r => {
+                if (r.classList.contains('hidden')) isAnyHidden = true;
+            });
+
+            rows.forEach(r => {
+                if (isAnyHidden) r.classList.remove('hidden');
+                else r.classList.add('hidden');
+            });
+
+            const listEl = document.getElementById(`acc${accIdx}-inventory-list`);
+            const subBtns = listEl.querySelectorAll('button');
+            subBtns.forEach(b => {
+                b.innerText = isAnyHidden ? '^' : 'v';
+            });
+        }
+
+        function renderInventory() {
+            ['帳戶一', '帳戶二'].forEach((accName, idx) => {
+                const { cash, holdings } = calculatePortfolio(accName);
+                const listEl = document.getElementById(`acc${idx+1}-inventory-list`);
+                listEl.innerHTML = '';
+
+                let totalMarketValue = 0;
+                let totalUnrealizedPnL = 0;
+                let totalCostSum = 0;
+
+                const sortedCodes = Object.keys(holdings).sort((a, b) => a.localeCompare(b));
+
+                sortedCodes.forEach(code => {
+                    const h = holdings[code];
+                    if (h.shares <= 0) return;
+
+                    const stockObj = stockPrices[code];
+                    const hasPrice = stockObj && stockObj.price !== null && !isNaN(stockObj.price);
+                    const currentPrice = hasPrice ? stockObj.price : 0;
+                    const avgPrice = h.shares > 0 ? (h.totalCost / h.shares) : 0;
+
+                    let marketPriceDisplay = '<span class="text-gray-400 font-mono font-normal">--</span>';
+                    let pnlDisplayHtml = '<span class="text-gray-400 font-mono font-normal">--</span>';
+
+                    if (hasPrice) {
+                        marketPriceDisplay = currentPrice.toFixed(2);
+                        const marketValue = currentPrice * h.shares;
+
+                        const estSellFee = Math.round(marketValue * 0.0008115);
+                        const estSellTax = Math.round(marketValue * 0.001);
+                        const estNetSellRevenue = marketValue - estSellFee - estSellTax;
+
+                        const pnlAmount = estNetSellRevenue - h.totalCost;
+                        const pnlPercent = h.totalCost > 0 ? (pnlAmount / h.totalCost) * 100 : 0;
+
+                        totalMarketValue += marketValue;
+                        totalUnrealizedPnL += pnlAmount;
+                        totalCostSum += h.totalCost;
+
+                        const pnlSign = pnlAmount >= 0 ? '+' : '';
+                        const colorClass = pnlAmount >= 0 ? 'text-red-600' : 'text-green-600';
+
+                        pnlDisplayHtml = `
+                            <div class="font-bold ${colorClass}">${pnlSign}$${Math.round(pnlAmount).toLocaleString()}</div>
+                            <div class="text-xs ${colorClass}">${pnlSign}${pnlPercent.toFixed(2)}%</div>
+                        `;
+                    }
+
+                    const rowId = `expand-${idx+1}-${code}`;
+
+                    const tr = document.createElement('tr');
+                    tr.className = "border-b border-purpleTheme-200/60 bg-purpleTheme-100/80 hover:bg-purpleTheme-200/80 text-sm transition-colors";
+                    
+                    tr.innerHTML = `
+                        <td class="py-3.5 px-4 text-center">
+                            <button onclick="toggleExpand('${rowId}', this)" class="w-6 h-6 rounded border border-purpleTheme-300 bg-white text-purpleTheme-800 hover:bg-purpleTheme-50 font-mono text-xs flex items-center justify-center mx-auto transition">
+                                v
+                            </button>
+                        </td>
+                        <td class="py-3.5 px-4 cursor-pointer hover:opacity-80 transition" onclick="toggleExpand('${rowId}', this.parentElement.querySelector('button'))" title="點擊展開/折疊批次明細">
+                            <div class="font-bold text-gray-900 text-base">${code}</div>
+                            <div class="text-xs font-medium text-gray-600">${STOCKS[code]}</div>
+                        </td>
+                        <td class="py-3.5 px-4 text-right font-medium font-mono text-gray-800">${marketPriceDisplay}</td>
+                        <td class="py-3.5 px-4 text-right font-mono text-gray-800">${avgPrice.toFixed(2)}</td>
+                        <td class="py-3.5 px-4 text-right font-bold font-mono text-gray-900">${h.shares.toLocaleString()}</td>
+                        <td class="py-3.5 px-4 text-right font-mono">
+                            ${pnlDisplayHtml}
+                        </td>
+                    `;
+                    listEl.appendChild(tr);
+
+                    const expandTr = document.createElement('tr');
+                    expandTr.id = rowId;
+                    expandTr.className = "hidden bg-purpleTheme-50/60 border-b border-purpleTheme-100";
+
+                    let buyDetailsHtml = h.buys.map(b => {
+                        const itemBuyCost = b.price * b.shares + b.fee;
+                        let itemPnlHtml = '<span class="text-gray-400 font-mono font-normal">--</span>';
+
+                        if (hasPrice) {
+                            const itemMarketVal = currentPrice * b.shares;
+                            const itemEstSellFee = Math.round(itemMarketVal * 0.0008115);
+                            const itemEstSellTax = Math.round(itemMarketVal * 0.001);
+                            const itemNetSellRev = itemMarketVal - itemEstSellFee - itemEstSellTax;
+
+                            const itemPnl = itemNetSellRev - itemBuyCost;
+                            const itemPnlPct = itemBuyCost > 0 ? (itemPnl / itemBuyCost) * 100 : 0;
+                            const itemSign = itemPnl >= 0 ? '+' : '';
+                            const itemColor = itemPnl >= 0 ? 'text-red-600' : 'text-green-600';
+
+                            itemPnlHtml = `<span class="${itemColor}">${itemSign}$${Math.round(itemPnl).toLocaleString()} (${itemSign}${itemPnlPct.toFixed(2)}%)</span>`;
+                        }
+
+                        return `
+                            <tr class="text-xs border-b border-gray-100">
+                                <td class="py-1.5 px-3 font-mono text-gray-800">${b.date}</td>
+                                <td class="py-1.5 px-3 text-right font-mono text-gray-800">$${b.price.toFixed(2)}</td>
+                                <td class="py-1.5 px-3 text-right font-mono text-gray-800">${b.shares} 股</td>
+                                <td class="py-1.5 px-3 text-right font-mono font-bold">
+                                    ${itemPnlHtml}
+                                </td>
+                            </tr>
+                        `;
+                    }).join('');
+
+                    expandTr.innerHTML = `
+                        <td colspan="6" class="p-3">
+                            <div class="bg-white p-3 rounded-lg border border-purpleTheme-200 max-w-2xl mx-auto shadow-inner">
+                                <div class="text-xs font-bold text-gray-700 mb-2">批次買進明細</div>
+                                <table class="w-full text-left">
+                                    <thead>
+                                        <tr class="text-xs text-gray-500 border-b border-gray-100">
+                                            <th class="py-1 px-3">成交日</th>
+                                            <th class="py-1 px-3 text-right">成交價</th>
+                                            <th class="py-1 px-3 text-right">持有股數</th>
+                                            <th class="py-1 px-3 text-right">個別未實現損益</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${buyDetailsHtml}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </td>
+                    `;
+                    listEl.appendChild(expandTr);
+                });
+
+                const totalAsset = cash + totalMarketValue;
+                const accPnlPct = totalCostSum > 0 ? (totalUnrealizedPnL / totalCostSum) * 100 : 0;
+                const accPnlSign = totalUnrealizedPnL >= 0 ? '+' : '';
+
+                document.getElementById(`acc${idx+1}-cash`).innerText = `$${Math.round(cash).toLocaleString()}`;
+                document.getElementById(`acc${idx+1}-market`).innerText = totalMarketValue > 0 ? `$${Math.round(totalMarketValue).toLocaleString()}` : '--';
+                document.getElementById(`acc${idx+1}-total`).innerText = `$${Math.round(totalAsset).toLocaleString()}`;
+                
+                const pnlEl = document.getElementById(`acc${idx+1}-pnl`);
+                if (totalCostSum > 0 && totalMarketValue > 0) {
+                    pnlEl.innerHTML = `${accPnlSign}$${Math.round(totalUnrealizedPnL).toLocaleString()} <span class="text-xs font-mono">(${accPnlSign}${accPnlPct.toFixed(2)}%)</span>`;
+                    pnlEl.className = totalUnrealizedPnL >= 0 ? 'text-red-400 font-bold font-mono' : 'text-green-400 font-bold font-mono';
+                } else {
+                    pnlEl.innerHTML = '--';
+                    pnlEl.className = 'text-gray-300 font-mono';
+                }
+            });
+        }
+
+        function toggleExpand(id, btn) {
+            const target = document.getElementById(id);
+            if (!target) return;
+            if (target.classList.contains('hidden')) {
+                target.classList.remove('hidden');
+                if (btn) btn.innerText = '^';
+            } else {
+                target.classList.add('hidden');
+                if (btn) btn.innerText = 'v';
+            }
+        }
+
+        function renderTransactions() {
+            const list = document.getElementById('transaction-list');
+            list.innerHTML = '';
+
+            const filterDate = document.getElementById('filter-date')?.value || '';
+            const accFilter = document.getElementById('filter-account')?.value || '';
+            const typeFilter = document.getElementById('filter-type')?.value || '';
+            const stockFilter = document.getElementById('filter-stock')?.value || '';
+
+            const resetBtn = document.getElementById('reset-filter-btn');
+            if (filterDate || accFilter || typeFilter || stockFilter) {
+                resetBtn.classList.remove('hidden');
+            } else {
+                resetBtn.classList.add('hidden');
+            }
+
+            let filtered = transactions.filter(t => {
+                if (filterDate && t.date !== filterDate) return false;
+                if (accFilter && t.account !== accFilter) return false;
+                if (typeFilter && t.type !== typeFilter) return false;
+                if (stockFilter && t.stock !== stockFilter) return false;
+                return true;
+            });
+
+            filtered.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+            filtered.forEach((t, index) => {
+                const tr = document.createElement('tr');
+                
+                const bgClass = index % 2 === 0 ? 'bg-white' : 'bg-purpleTheme-100/70';
+                tr.className = `border-b border-purpleTheme-100 ${bgClass} hover:bg-purpleTheme-200/50 text-sm transition-colors text-gray-800`;
+
+                let typeTag = '';
+                if (t.type === 'BUY') typeTag = `<span class="bg-red-50 text-red-700 px-2 py-0.5 rounded text-xs font-semibold">買進</span>`;
+                else if (t.type === 'SELL') typeTag = `<span class="bg-green-50 text-green-700 px-2 py-0.5 rounded text-xs font-semibold">賣出</span>`;
+                else typeTag = `<span class="bg-purpleTheme-200 text-purpleTheme-900 px-2 py-0.5 rounded text-xs font-semibold">配息</span>`;
+
+                tr.innerHTML = `
+                    <td class="py-3 px-4 font-mono">${t.date}</td>
+                    <td class="py-3 px-4 font-medium">${t.account}</td>
+                    <td class="py-3 px-4">${typeTag}</td>
+                    <td class="py-3 px-4 font-medium">${t.stock} - ${STOCKS[t.stock]}</td>
+                    <td class="py-3 px-4 text-right font-mono">${t.type === 'DIVIDEND' ? '-' : '$' + t.price.toFixed(2)}</td>
+                    <td class="py-3 px-4 text-right font-mono">${t.type === 'DIVIDEND' ? '-' : t.shares.toLocaleString()}</td>
+                    <td class="py-3 px-4 text-right font-mono">${t.type === 'DIVIDEND' ? '-' : '$' + (t.fee + t.tax)}</td>
+                    <td class="py-3 px-4 text-right font-bold font-mono ${t.netAmount >= 0 ? 'text-green-600' : 'text-red-600'}">
+                        ${t.netAmount >= 0 ? '+' : ''}$${Math.round(t.netAmount).toLocaleString()}
+                    </td>
+                    <td class="py-3 px-4 text-center space-x-2">
+                        <button onclick="editTransaction(${t.id})" class="text-purpleTheme-800 hover:text-purpleTheme-600 text-xs font-semibold">修改</button>
+                        <button onclick="deleteTransaction(${t.id})" class="text-red-500 hover:text-red-700 text-xs font-semibold">刪除</button>
+                    </td>
+                `;
+                list.appendChild(tr);
+            });
+        }
+
+        // 渲染看盤頁面
+        function renderMarketWatch() {
+            const indexContainer = document.getElementById('index-cards');
+            const etfContainer = document.getElementById('etf-cards');
+            if (!indexContainer || !etfContainer) return;
+
+            // 1. 大盤指數方格
+            indexContainer.innerHTML = Object.keys(indexMarketData).map(key => {
+                const item = indexMarketData[key];
+                const hasData = item && item.price !== null && !isNaN(item.price);
+
+                const priceDisplay = hasData 
+                    ? item.price.toLocaleString(undefined, {minimumFractionDigits: 2})
+                    : '--';
+
+                let changeHtml = '<span class="text-gray-400 font-mono font-normal">--</span>';
+                if (hasData && item.change !== null) {
+                    const isPos = item.change >= 0;
+                    const color = isPos ? 'text-red-600' : 'text-green-600';
+                    const sign = isPos ? '+' : '';
+                    changeHtml = `<span class="${color}">${sign}${item.change.toFixed(2)} (${sign}${item.pct.toFixed(2)}%)</span>`;
+                }
+
+                return `
+                    <div class="bg-white rounded-xl p-4 shadow-sm border border-purpleTheme-100 hover:border-purpleTheme-300 transition flex flex-col justify-between">
+                        <div class="text-xs font-bold text-gray-500 mb-1">${item.name} (${key})</div>
+                        <div class="text-2xl font-bold font-mono text-gray-900 mb-1">${priceDisplay}</div>
+                        <div class="text-sm md:text-base font-bold font-mono">
+                            ${changeHtml}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            // 2. 自選三檔 ETF 方格
+            etfContainer.innerHTML = Object.keys(STOCKS).map(code => {
+                const stockObj = stockPrices[code];
+                const hasData = stockObj && stockObj.price !== null && !isNaN(stockObj.price);
+
+                const priceDisplay = hasData ? `$${stockObj.price.toFixed(2)}` : '--';
+                let changeHtml = '<span class="text-gray-400 font-mono font-normal">--</span>';
+
+                if (hasData && stockObj.change !== null) {
+                    const isPos = stockObj.change >= 0;
+                    const color = isPos ? 'text-red-600' : 'text-green-600';
+                    const sign = isPos ? '+' : '';
+                    changeHtml = `<span class="${color}">${sign}${stockObj.change.toFixed(2)} (${sign}${stockObj.pct.toFixed(2)}%)</span>`;
+                }
+
+                return `
+                    <div class="bg-white rounded-xl p-4 shadow-sm border border-purpleTheme-100 hover:border-purpleTheme-300 transition flex flex-col justify-between">
+                        <div>
+                            <div class="text-base font-bold text-purpleTheme-950">${code}</div>
+                            <div class="text-xs text-gray-500 font-medium truncate mb-2">${STOCKS[code]}</div>
+                        </div>
+                        <div class="text-2xl font-bold font-mono text-gray-900 mb-1">${priceDisplay}</div>
+                        <div class="text-sm md:text-base font-bold font-mono">
+                            ${changeHtml}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function clearFilters() {
+            document.getElementById('filter-date').value = '';
+            document.getElementById('filter-account').value = '';
+            document.getElementById('filter-type').value = '';
+            document.getElementById('filter-stock').value = '';
+            renderTransactions();
+        }
+
+        function saveLocalData() {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(transactions));
+        }
+
+        function loadLocalData() {
+            const data = localStorage.getItem(STORAGE_KEY);
+            if (data) {
+                try {
+                    transactions = JSON.parse(data);
+                } catch(e) {
+                    transactions = [];
+                }
+            }
+        }
+
+        function exportPDF() {
+            const inventoryEl = document.getElementById('tab-inventory');
+            const dateHeader = document.getElementById('pdf-date-header');
+            const dateText = document.getElementById('pdf-export-date');
+
+            const todayStr = new Date().toISOString().split('T')[0];
+            dateText.innerText = `報表日期：${todayStr}`;
+            
+            dateHeader.classList.remove('hidden');
+            dateHeader.classList.add('flex');
+
+            const isHidden = inventoryEl.classList.contains('hidden');
+            if (isHidden) inventoryEl.classList.remove('hidden');
+
+            const opt = {
+                margin:       [10, 10, 10, 10],
+                filename:     `持股庫存報表_${todayStr}.pdf`,
+                image:        { type: 'jpeg', quality: 0.98 },
+                html2canvas:  { scale: 2, useCORS: true },
+                jsPDF:        { unit: 'mm', format: 'a4', orientation: 'landscape' }
+            };
+
+            html2pdf().set(opt).from(inventoryEl).save().then(() => {
+                dateHeader.classList.add('hidden');
+                dateHeader.classList.remove('flex');
+                if (isHidden) inventoryEl.classList.add('hidden');
+            });
+        }
+    </script>
+</body>
+</html>
