@@ -467,7 +467,6 @@
             '00982A': '主動群益台灣強棒'
         };
 
-        // 初始狀態：全數預設為 null，未取得成功前堅持顯示 --，絕不呈現任何假數字
         let stockPrices = {
             '00980A': { price: null, change: null, pct: null },
             '00981A': { price: null, change: null, pct: null },
@@ -519,117 +518,61 @@
             }
         }
 
-        function fetchAllMarketData() {
-            fetchStockPrices();
-            fetchIndexPrices();
-        }
+        // 核心：直接呼叫您自己的 Cloudflare Worker 後端 (/api/market)
+        async function fetchAllMarketData() {
+            try {
+                const res = await fetch("https://stock-portfolio.y-ys-sl-l1226.workers.dev/api/market", {
+                    cache: "no-store"
+                });
+                const json = await res.json();
 
-        // 直連 FinMind 官方 API (原生支援 CORS 跨域，不需經任何第三方代理)
-        async function fetchStockPrices() {
-            const keys = Object.keys(STOCKS);
-            const today = new Date();
-            const startDate = new Date(today.setDate(today.getDate() - 30)).toISOString().split('T')[0];
+                if (json.success && json.data) {
+                    const d = json.data;
 
-            for (let code of keys) {
-                try {
-                    const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${code}&start_date=${startDate}`;
-                    const res = await fetch(url);
-                    if (!res.ok) continue;
-
-                    const data = await res.json();
-                    if (data.data && data.data.length > 0) {
-                        const len = data.data.length;
-                        const latest = data.data[len - 1];
-                        const price = parseFloat(latest.close || 0);
-                        let prevPrice = price;
-                        if (len >= 2) prevPrice = parseFloat(data.data[len - 2].close || price);
-
-                        const change = price - prevPrice;
-                        const pct = prevPrice > 0 ? (change / prevPrice) * 100 : 0;
-
-                        if (price > 0) {
-                            stockPrices[code] = { price, change, pct };
+                    // 1. 更新三檔 ETF (00980A, 00981A, 00982A)
+                    Object.keys(STOCKS).forEach(code => {
+                        if (d[code] && d[code].price !== null && !isNaN(d[code].price)) {
+                            stockPrices[code] = {
+                                price: Number(d[code].price),
+                                change: d[code].change !== null ? Number(d[code].change) : null,
+                                pct: d[code].pct !== null ? Number(d[code].pct) : null
+                            };
+                        } else {
+                            stockPrices[code] = { price: null, change: null, pct: null };
                         }
-                    }
-                } catch (e) {
-                    console.error(`FinMind 抓取 ${code} 失敗：`, e);
+                    });
+
+                    // 2. 更新大盤指數 (TAIEX 加權, TWO 櫃買, TX 台指期)
+                    ['TAIEX', 'TX', 'TWO'].forEach(key => {
+                        if (d[key] && d[key].price !== null && !isNaN(d[key].price)) {
+                            indexMarketData[key] = {
+                                name: d[key].name || indexMarketData[key].name,
+                                price: Number(d[key].price),
+                                change: d[key].change !== null ? Number(d[key].change) : null,
+                                pct: d[key].pct !== null ? Number(d[key].pct) : null
+                            };
+                        } else {
+                            indexMarketData[key] = {
+                                name: indexMarketData[key].name,
+                                price: null, change: null, pct: null
+                            };
+                        }
+                    });
+
+                    renderInventory();
+                    renderMarketWatch();
+                    return;
                 }
+            } catch (e) {
+                console.error("Worker 行情請求未成功：", e);
             }
+
             renderInventory();
             renderMarketWatch();
         }
 
-        // 直連 FinMind 官方 API - 大盤與指數 (原生支援 CORS)
-        async function fetchIndexPrices() {
-            const today = new Date();
-            const startDate = new Date(today.setDate(today.getDate() - 30)).toISOString().split('T')[0];
-
-            // 1. 加權指數 (001) 與 櫃買指數 (101)
-            const indices = [
-                { id: '001', key: 'TAIEX', name: '加權指數' },
-                { id: '101', key: 'TWO', name: '櫃買指數' }
-            ];
-
-            for (let idx of indices) {
-                try {
-                    const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${idx.id}&start_date=${startDate}`;
-                    const res = await fetch(url);
-                    if (!res.ok) continue;
-
-                    const data = await res.json();
-                    if (data.data && data.data.length > 0) {
-                        const len = data.data.length;
-                        const latest = data.data[len - 1];
-                        const price = parseFloat(latest.close || 0);
-                        let prevPrice = price;
-                        if (len >= 2) prevPrice = parseFloat(data.data[len - 2].close || price);
-
-                        const change = price - prevPrice;
-                        const pct = prevPrice > 0 ? (change / prevPrice) * 100 : 0;
-
-                        if (price > 0) {
-                            indexMarketData[idx.key] = { name: idx.name, price, change, pct };
-                        }
-                    }
-                } catch (e) {
-                    console.error(`FinMind 抓取 ${idx.key} 失敗：`, e);
-                }
-            }
-
-            // 2. 台指期 (TX) - 抓取近月真實點數 (>10000 點)
-            try {
-                const futUrl = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanFuturesDaily&data_id=TX&start_date=${startDate}`;
-                const res = await fetch(futUrl);
-                if (res.ok) {
-                    const data = await res.json();
-                    if (data.data && data.data.length > 0) {
-                        const txData = data.data.filter(d => (d.close || d.settlement_price) && parseFloat(d.close || d.settlement_price) > 10000);
-                        if (txData.length > 0) {
-                            const len = txData.length;
-                            const latest = txData[len - 1];
-                            const price = parseFloat(latest.close || latest.settlement_price || 0);
-                            let prevPrice = price;
-                            if (len >= 2) prevPrice = parseFloat(txData[len - 2].close || txData[len - 2].settlement_price || price);
-
-                            const change = price - prevPrice;
-                            const pct = prevPrice > 0 ? (change / prevPrice) * 100 : 0;
-
-                            if (price > 0) {
-                                indexMarketData['TX'] = { name: '台指期', price, change, pct };
-                            }
-                        }
-                    }
-                }
-            } catch (e) {
-                console.error("FinMind 抓取 台指期 失敗：", e);
-            }
-
-            renderMarketWatch();
-        }
-
         function refreshPrices() {
-            fetchStockPrices();
-            fetchIndexPrices();
+            fetchAllMarketData();
         }
 
         function toggleFormFields() {
