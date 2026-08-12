@@ -60,7 +60,7 @@ export async function onRequest(context) {
                 let displayName = item.n || code;
                 if (code === 't00') {
                     key = 'TAIEX';
-                    displayName = '加權指數'; // 強制簡化為「加權指數」
+                    displayName = '加權指數';
                 }
                 if (code === 'o00') {
                     key = 'TWO';
@@ -79,10 +79,10 @@ export async function onRequest(context) {
             });
         }
 
-        // 2. 台指期 (TX) - 第一優先：TAIFEX 期交所官方即時 API ➔ 第二備援：FinMind ➔ 均失敗：傳回 null (顯示 --)
+        // 2. 直連 TAIFEX 台灣期貨交易所 API (優先) ➔ FinMind 近月主力合約過濾 (備援)
         let txResult = null;
 
-        // 【第一優先】向 TAIFEX 台灣期貨交易所官方 API 請求 (補齊必備防護標頭 Origin & Referer)
+        // 【第一優先】向 TAIFEX 台灣期貨交易所官方 API 請求
         try {
             const taifexUrl = "https://mis.taifex.com.tw/futures/api/getFutureInfo";
             const taifexRes = await fetch(taifexUrl, {
@@ -100,19 +100,16 @@ export async function onRequest(context) {
                 const txJson = await taifexRes.json();
                 let q = null;
                 if (txJson && txJson.RtData) {
-                    if (txJson.RtData.Quote) {
-                        q = txJson.RtData.Quote;
-                    } else if (Array.isArray(txJson.RtData.QuoteList) && txJson.RtData.QuoteList.length > 0) {
-                        q = txJson.RtData.QuoteList[0];
-                    }
+                    if (txJson.RtData.Quote) q = txJson.RtData.Quote;
+                    else if (Array.isArray(txJson.RtData.QuoteList) && txJson.RtData.QuoteList.length > 0) q = txJson.RtData.QuoteList[0];
                 }
 
                 if (q) {
-                    const priceStr = (q.CLastPrice && q.CLastPrice !== '-') ? q.CLastPrice : q.CRefPrice;
-                    const price = parseFloat(priceStr || 0);
+                    const price = parseFloat((q.CLastPrice && q.CLastPrice !== '-') ? q.CLastPrice : q.CRefPrice);
                     const yesterday = parseFloat(q.CRefPrice || price);
 
-                    if (!isNaN(price) && price > 10000 && !isNaN(yesterday) && yesterday > 0) {
+                    // 限制只有合理近月範圍點數 (例如 15000 ~ 35000 點) 才採納
+                    if (!isNaN(price) && price > 10000 && price < 35000 && !isNaN(yesterday) && yesterday > 0) {
                         const change = price - yesterday;
                         const pct = (change / yesterday) * 100;
                         txResult = { name: '台指期', price: price, change: change, pct: pct };
@@ -120,10 +117,10 @@ export async function onRequest(context) {
                 }
             }
         } catch (e) {
-            console.warn("TAIFEX 官方期貨 API 擷取未成功，嘗試 FinMind 備援...", e);
+            console.warn("TAIFEX 官方期貨 API 未回應，切換至 FinMind 近月主力合約解析...", e);
         }
 
-        // 【第二備援】FinMind 期貨資料庫 API
+        // 【第二備援】FinMind 期貨資料庫 (精確鎖定近月主力合約 contract_date)
         if (!txResult) {
             try {
                 const startDate = new Date(now.getTime() - 20 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
@@ -132,29 +129,47 @@ export async function onRequest(context) {
                 if (futRes.ok) {
                     const futJson = await futRes.json();
                     if (futJson.data && futJson.data.length > 0) {
-                        const txData = futJson.data.filter(d => (d.close || d.settlement_price) && parseFloat(d.close || d.settlement_price) > 10000);
-                        if (txData.length > 0) {
-                            const len = txData.length;
-                            const latest = txData[len - 1];
-                            const price = parseFloat(latest.close || latest.settlement_price || 0);
-                            let prevPrice = price;
-                            if (len >= 2) prevPrice = parseFloat(txData[len - 2].close || txData[len - 2].settlement_price || price);
+                        // 1. 過濾出有有效價格且合約格式正確的紀錄
+                        const validRows = futJson.data.filter(d => {
+                            const p = parseFloat(d.close || d.settlement_price || 0);
+                            return p > 10000 && p < 35000 && d.contract_date && d.contract_date.length === 6;
+                        });
 
-                            const change = price - prevPrice;
-                            const pct = prevPrice > 0 ? (change / prevPrice) * 100 : 0;
+                        if (validRows.length > 0) {
+                            // 2. 找到最新一天的日期
+                            const latestDate = validRows[validRows.length - 1].date;
+                            const latestDayRows = validRows.filter(d => d.date === latestDate);
 
-                            if (price > 10000) {
-                                txResult = { name: '台指期', price: price, change: change, pct: pct };
+                            // 3. 排序合約月份，取第一個 (即當月近月主力合約，如 202608)
+                            latestDayRows.sort((a, b) => a.contract_date.localeCompare(b.contract_date));
+                            const frontMonthContract = latestDayRows[0].contract_date;
+
+                            // 4. 只抓取這個「近月合約」的歷史紀錄，用同一合約算當日漲跌
+                            const targetContractRows = validRows.filter(d => d.contract_date === frontMonthContract);
+                            const len = targetContractRows.length;
+
+                            if (len > 0) {
+                                const todayRow = targetContractRows[len - 1];
+                                const prevRow = len >= 2 ? targetContractRows[len - 2] : todayRow;
+
+                                const price = parseFloat(todayRow.close || todayRow.settlement_price || 0);
+                                const prevPrice = parseFloat(prevRow.close || prevRow.settlement_price || price);
+
+                                if (price > 10000) {
+                                    const change = price - prevPrice;
+                                    const pct = prevPrice > 0 ? (change / prevPrice) * 100 : 0;
+                                    txResult = { name: '台指期', price, change, pct };
+                                }
                             }
                         }
                     }
                 }
             } catch (e) {
-                console.warn("FinMind 期貨 API 亦無法取得", e);
+                console.warn("FinMind 近月合約解析未成功", e);
             }
         }
 
-        // 兩者均無法取得有效資料時，堅決回傳 null (前端顯示 --，絕不套用加權指數點數)
+        // 若無近月合約資料，堅決傳回 null (前端顯示 --，絕不拿假數字充數)
         results['TX'] = txResult || { name: '台指期', price: null, change: null, pct: null };
 
         return new Response(
