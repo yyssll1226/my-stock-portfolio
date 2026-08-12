@@ -467,7 +467,7 @@
             '00982A': '主動群益台灣強棒'
         };
 
-        // 初始狀態：預設全為 null，未取得成功前堅持顯示 --
+        // 初始狀態：預設全為 null，未取得成功前堅持顯示 --，絕不呈現任何假數字
         let stockPrices = {
             '00980A': { price: null, change: null, pct: null },
             '00981A': { price: null, change: null, pct: null },
@@ -519,10 +519,9 @@
             }
         }
 
-        // 核心：呼叫同網站同網域下的 Pages 內建後端 /api/stock (完全沒有跨域 CORS 問題)
+        // 核心：呼叫同網域 Pages 內建微後端 /api/stock (完全沒有跨域 CORS 問題)
         async function fetchAllMarketData() {
             try {
-                // 同網域呼叫 Cloudflare Pages Functions
                 const res = await fetch('/api/stock', { cache: 'no-store' });
                 const json = await res.json();
 
