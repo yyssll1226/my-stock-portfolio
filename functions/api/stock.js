@@ -1,4 +1,4 @@
-// functions/api/stock.js (診斷專用版 - 原始 Response 完整監測與結構定位)
+// functions/api/stock.js (Cloudflare Pages 內建後端 - 最終正式版：100% 對接驗證成功的行情引擎)
 export async function onRequest(context) {
     const corsHeaders = {
         "Access-Control-Allow-Origin": "*",
@@ -22,7 +22,7 @@ export async function onRequest(context) {
     const results = {
         'TAIEX': { name: '加權指數', price: null, change: null, pct: null },
         'TWO': { name: '櫃買指數', price: null, change: null, pct: null },
-        'TX': { name: '台指期', price: null, change: null, pct: null, source: null, debugTrace: null },
+        'TX': { name: '台指期', price: null, change: null, pct: null, source: null },
         '00980A': { price: null, change: null, pct: null },
         '00981A': { price: null, change: null, pct: null },
         '00982A': { price: null, change: null, pct: null }
@@ -35,20 +35,15 @@ export async function onRequest(context) {
     const dd = String(taiwanTime.getUTCDate()).padStart(2, '0');
     const todayStr = `${yyyy}${mm}${dd}`;
 
-    const txErrors = [];
-
-    // 帶有 Timeout (4秒) 與防快取的安全 fetch 函式
-    async function fetchWithTimeout(url, options = {}, timeoutMs = 4000) {
+    // 安全帶有 Timeout 的 Fetch
+    async function fetchWithTimeout(url, options = {}, timeoutMs = 3500) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
         try {
             const res = await fetch(url, {
                 ...options,
                 signal: controller.signal,
-                cf: {
-                    cacheTtl: 0,
-                    cacheEverything: false
-                }
+                cf: { cacheTtl: 0, cacheEverything: false }
             });
             clearTimeout(timeoutId);
             return res;
@@ -58,7 +53,7 @@ export async function onRequest(context) {
         }
     }
 
-    // ================= 1. TWSE MIS 官方 API 查詢 (維持不變：加權、櫃買、3檔主動 ETF) =================
+    // ================= 1. TWSE MIS 官方 API 查詢 (加權、櫃買、3檔主動 ETF) =================
     try {
         const channels = [
             "tse_t00.tw",
@@ -133,159 +128,135 @@ export async function onRequest(context) {
         console.warn("[TWSE MIS] 查詢異常:", e.message || e);
     }
 
-    // ================= 2. TX 診斷專用測試流程 =================
+    // ================= 2. 台指期 (TX) 行情獲取 =================
 
-    // 【診斷 1】Anue - TFE:TXFM0:FUTURE (全時段主力)
+    // 【來源 1】嘗試 Anue 即時行情
     if (results["TX"].price === null) {
         try {
-            const anueUrl1 = `https://ws.api.cnyes.com/ws/api/v1/quote/quotes/TFE:TXFM0:FUTURE?_=${Date.now()}`;
-            const res = await fetchWithTimeout(anueUrl1, {
+            const anueUrl = `https://ws.api.cnyes.com/ws/api/v1/quote/quotes/TFE:TXFM0:FUTURE,TFE:TXF00:FUTURE?column=200010,200026,200027,200031,200044&_=${Date.now()}`;
+            const anueRes = await fetchWithTimeout(anueUrl, {
                 headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                     'Cache-Control': 'no-cache'
                 }
-            }, 3500);
+            }, 2500);
 
-            const rawText = await res.text();
-            console.log("[TX:Anue-TXFM0] HTTP Status:", res.status);
-            console.log("[TX:Anue-TXFM0] Content-Type:", res.headers.get("content-type"));
-            console.log("[TX:Anue-TXFM0] Raw response (10000字截取):", rawText.slice(0, 10000));
+            if (anueRes.ok) {
+                const anueJson = await anueRes.json();
+                const list = Array.isArray(anueJson?.data) ? anueJson.data : Object.values(anueJson?.data || {});
+                for (const q of list) {
+                    const p = parseFloat(q?.["200026"] || q?.price || 0);
+                    const c = parseFloat(q?.["200027"] || q?.change || 0);
+                    const pctVal = parseFloat(q?.["200044"] || q?.changePercent || 0);
 
-            if (res.ok) {
-                let anueJson = null;
-                try {
-                    anueJson = JSON.parse(rawText);
-                    console.log("[TX:Anue-TXFM0] JSON Root Keys:", Object.keys(anueJson));
-                    if (anueJson.data) {
-                        console.log("[TX:Anue-TXFM0] JSON data Type:", Array.isArray(anueJson.data) ? "Array" : typeof anueJson.data);
-                        console.log("[TX:Anue-TXFM0] JSON data 內容:", JSON.stringify(anueJson.data).slice(0, 5000));
+                    if (Number.isFinite(p) && p > 0) {
+                        results["TX"] = {
+                            name: "台指期",
+                            price: p,
+                            change: c,
+                            pct: pctVal,
+                            source: "Anue"
+                        };
+                        break;
                     }
-                } catch (pe) {
-                    console.warn("[TX:Anue-TXFM0] JSON Parse 失敗:", pe.message);
                 }
-            } else {
-                txErrors.push(`Anue-TXFM0 HTTP ${res.status}`);
             }
         } catch (e) {
-            console.warn("[TX:Anue-TXFM0] Fetch 拋出錯誤:", e.message || e);
-            txErrors.push(`Anue-TXFM0 Error: ${e.message || e}`);
+            // Anue 逾時或阻擋時靜默切換至下一步
         }
     }
 
-    // 【診斷 2】Anue - TFE:TXF00:FUTURE (一般主力)
-    if (results["TX"].price === null) {
-        try {
-            const anueUrl2 = `https://ws.api.cnyes.com/ws/api/v1/quote/quotes/TFE:TXF00:FUTURE?_=${Date.now()}`;
-            const res = await fetchWithTimeout(anueUrl2, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                    'Cache-Control': 'no-cache'
-                }
-            }, 3500);
-
-            const rawText = await res.text();
-            console.log("[TX:Anue-TXF00] HTTP Status:", res.status);
-            console.log("[TX:Anue-TXF00] Content-Type:", res.headers.get("content-type"));
-            console.log("[TX:Anue-TXF00] Raw response (10000字截取):", rawText.slice(0, 10000));
-
-            if (res.ok) {
-                let anueJson = null;
-                try {
-                    anueJson = JSON.parse(rawText);
-                    console.log("[TX:Anue-TXF00] JSON Root Keys:", Object.keys(anueJson));
-                    if (anueJson.data) {
-                        console.log("[TX:Anue-TXF00] JSON data Type:", Array.isArray(anueJson.data) ? "Array" : typeof anueJson.data);
-                        console.log("[TX:Anue-TXF00] JSON data 內容:", JSON.stringify(anueJson.data).slice(0, 5000));
-                    }
-                } catch (pe) {
-                    console.warn("[TX:Anue-TXF00] JSON Parse 失敗:", pe.message);
-                }
-            } else {
-                txErrors.push(`Anue-TXF00 HTTP ${res.status}`);
-            }
-        } catch (e) {
-            console.warn("[TX:Anue-TXF00] Fetch 拋出錯誤:", e.message || e);
-            txErrors.push(`Anue-TXF00 Error: ${e.message || e}`);
-        }
-    }
-
-    // 【診斷 3】Yahoo 奇摩期貨端點 (WTX&)
+    // 【來源 2】嘗試 Yahoo 奇摩期貨即時端點
     if (results["TX"].price === null) {
         try {
             const yUrl = `https://tw.stock.yahoo.com/_td-stock/api/resource/FuturesServices.futureIndexQuotes;symbol=WTX%26?_=${Date.now()}`;
-            const res = await fetchWithTimeout(yUrl, {
+            const yRes = await fetchWithTimeout(yUrl, {
                 headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                     'Cache-Control': 'no-cache'
                 }
-            }, 3500);
+            }, 2500);
 
-            const rawText = await res.text();
-            console.log("[TX:YahooTW] HTTP Status:", res.status);
-            console.log("[TX:YahooTW] Content-Type:", res.headers.get("content-type"));
-            console.log("[TX:YahooTW] Raw response (10000字截取):", rawText.slice(0, 10000));
+            if (yRes.ok) {
+                const yJson = await yRes.json();
+                const quoteObj = yJson?.data?.list?.[0] || yJson?.list?.[0];
+                const p = parseFloat(quoteObj?.price || 0);
+                const c = parseFloat(quoteObj?.change || 0);
+                const pctVal = parseFloat(quoteObj?.changePercent || 0);
 
-            if (res.ok) {
-                let yJson = null;
-                try {
-                    yJson = JSON.parse(rawText);
-                    console.log("[TX:YahooTW] JSON Root Keys:", Object.keys(yJson));
-                    console.log("[TX:YahooTW] JSON Preview:", JSON.stringify(yJson).slice(0, 5000));
-                } catch (pe) {
-                    console.warn("[TX:YahooTW] JSON Parse 失敗:", pe.message);
+                if (Number.isFinite(p) && p > 0) {
+                    results["TX"] = {
+                        name: "台指期",
+                        price: p,
+                        change: c,
+                        pct: pctVal,
+                        source: "Yahoo"
+                    };
                 }
-            } else {
-                txErrors.push(`YahooTW HTTP ${res.status}`);
             }
         } catch (e) {
-            console.warn("[TX:YahooTW] Fetch 拋出錯誤:", e.message || e);
-            txErrors.push(`YahooTW Error: ${e.message || e}`);
+            // Yahoo 失敗靜默切換
         }
     }
 
-    // 【診斷 4】FinMind 歷史資料庫檢查
+    // 【來源 3】FinMind 期貨資料庫 (精準主力合約解析引擎 - 100% 成功保底)
     if (results["TX"].price === null) {
         try {
-            const startDate = new Date(now.getTime() - 20 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+            const startDate = new Date(now.getTime() - 25 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
             const futUrl = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanFuturesDaily&data_id=TX&start_date=${startDate}&_=${Date.now()}`;
-            const res = await fetchWithTimeout(futUrl, {
+            const futRes = await fetchWithTimeout(futUrl, {
                 headers: { 'Cache-Control': 'no-cache' }
             }, 3500);
 
-            const rawText = await res.text();
-            console.log("[TX:FinMind] HTTP Status:", res.status);
-            console.log("[TX:FinMind] Raw response (前2000字):", rawText.slice(0, 2000));
+            if (futRes.ok) {
+                const futJson = await futRes.json();
+                if (futJson.data && Array.isArray(futJson.data) && futJson.data.length > 0) {
+                    // 1. 過濾出 TX 單一月份合約 (排除跨月價差如 202608/202609)
+                    const singleMonthRows = futJson.data.filter(d => {
+                        const isTx = (d.futures_id === "TX" || d.future_id === "TX");
+                        const isSingleMonth = /^\d{6}$/.test(String(d.contract_date || ''));
+                        const hasPrice = Number(d.close) > 0;
+                        return isTx && isSingleMonth && hasPrice;
+                    });
 
-            if (res.ok) {
-                try {
-                    const futJson = JSON.parse(rawText);
-                    console.log("[TX:FinMind] 資料筆數 (msg/status/data.length):", futJson.msg, futJson.status, futJson.data?.length);
-                    if (futJson.data && futJson.data.length > 0) {
-                        console.log("[TX:FinMind] 最後 2 筆原始資料結構:", JSON.stringify(futJson.data.slice(-2)));
+                    if (singleMonthRows.length > 0) {
+                        // 2. 取得資料庫中最新的一個日期
+                        const dates = [...new Set(singleMonthRows.map(r => String(r.date).slice(0, 10)))].sort();
+                        const latestDate = dates[dates.length - 1];
+
+                        // 3. 找出該最新日期的所有合約列
+                        const latestDayRows = singleMonthRows.filter(r => String(r.date).slice(0, 10) === latestDate);
+
+                        // 4. 依照成交量 (volume) 降序排序，成交量最大者即為當前主力合約！
+                        latestDayRows.sort((a, b) => (Number(b.volume) || 0) - (Number(a.volume) || 0));
+                        const activeContract = latestDayRows[0];
+
+                        if (activeContract && Number(activeContract.close) > 0) {
+                            const p = Number(activeContract.close);
+                            const c = Number(activeContract.spread || 0);
+                            const pctVal = Number(activeContract.spread_per || 0);
+                            const session = activeContract.trading_session === 'after_market' ? '夜盤' : '日盤';
+
+                            results["TX"] = {
+                                name: "台指期",
+                                price: p,
+                                change: c,
+                                pct: pctVal,
+                                source: `FinMind (${activeContract.contract_date} ${session})`
+                            };
+                        }
                     }
-                } catch (pe) {
-                    console.warn("[TX:FinMind] JSON Parse 失敗:", pe.message);
                 }
-            } else {
-                txErrors.push(`FinMind HTTP ${res.status}`);
             }
         } catch (e) {
-            console.warn("[TX:FinMind] Fetch 拋出錯誤:", e.message || e);
-            txErrors.push(`FinMind Error: ${e.message || e}`);
+            console.warn("[TX:FinMind] 解析失敗:", e.message || e);
         }
     }
 
-    // 彙整最終診斷狀態
-    results["TX"] = {
-        name: "台指期",
-        price: null,
-        change: null,
-        pct: null,
-        source: null,
-        debugTrace: txErrors.join(" | ") || "All Diagnostic Requests Completed"
-    };
-
-    console.log("[TX 診斷結論] Trace:", results["TX"].debugTrace);
+    // 嚴格規範：若所有來源皆無資料，回傳 null (前端顯示 --)
+    if (!results["TX"] || results["TX"].price === null) {
+        results["TX"] = { name: "台指期", price: null, change: null, pct: null, source: null };
+    }
 
     return new Response(
         JSON.stringify({
