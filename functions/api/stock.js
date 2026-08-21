@@ -1,4 +1,4 @@
-// functions/api/stock.js (Cloudflare Pages 內建後端 - 嚴格無快取、修復台指期多通道即時跳動與 ETF)
+// functions/api/stock.js (Cloudflare Pages 內建後端 - 嚴格無快取、全時段即時台指期與 ETF)
 export async function onRequest(context) {
     const corsHeaders = {
         "Access-Control-Allow-Origin": "*",
@@ -35,6 +35,27 @@ export async function onRequest(context) {
     const dd = String(taiwanTime.getUTCDate()).padStart(2, '0');
     const todayStr = `${yyyy}${mm}${dd}`;
 
+    // 輔助函式：帶有超時與防快取的 fetch
+    async function fetchWithTimeout(url, options = {}, timeoutMs = 4000) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            const res = await fetch(url, {
+                ...options,
+                signal: controller.signal,
+                cf: {
+                    cacheTtl: 0,
+                    cacheEverything: false
+                }
+            });
+            clearTimeout(timeoutId);
+            return res;
+        } catch (e) {
+            clearTimeout(timeoutId);
+            throw e;
+        }
+    }
+
     // ================= 1. TWSE MIS 官方 API 查詢 (加權、櫃買、3檔主動 ETF) =================
     try {
         const channels = [
@@ -46,13 +67,13 @@ export async function onRequest(context) {
         ];
         const misUrl = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${encodeURIComponent(channels.join('|'))}&json=1&delay=0&_=${Date.now()}`;
 
-        const twseRes = await fetch(misUrl, {
+        const twseRes = await fetchWithTimeout(misUrl, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
                 'Referer': 'https://mis.twse.com.tw/stock/fibest.jsp',
                 'Cache-Control': 'no-cache'
             }
-        });
+        }, 4000);
 
         if (twseRes.ok) {
             const data = await twseRes.json();
@@ -107,100 +128,106 @@ export async function onRequest(context) {
             }
         }
     } catch (e) {
-        console.warn("TWSE MIS 查詢失敗:", e);
+        console.warn("[TWSE MIS] 查詢異常:", e.message || e);
     }
 
-    // ================= 2. 台指期 (TX) 即時跳動行情抓取 (多重順位) =================
+    // ================= 2. 台指期 (TX) 即時跳動行情抓取 =================
 
-    // 【順位 A】：玩股網 Wantgoo 全球/台指即時 API (支援日盤與夜盤秒級跳動)
+    // 【來源 1：鉅亨網 Anue 即時報價 (支援日盤與夜盤連續合約)】
     if (results["TX"].price === null) {
         try {
-            const wantgooUrl = `https://www.wantgoo.com/global/api/getglobaldefault?_=${Date.now()}`;
-            const wgRes = await fetch(wantgooUrl, {
+            // 查詢 TFE:TXFM0:FUTURE (全時段主力) 與 TFE:TXF00:FUTURE (一般主力)
+            const anueUrl = `https://ws.api.cnyes.com/ws/api/v1/quote/quotes/TFE:TXFM0:FUTURE,TFE:TXF00:FUTURE?column=200010,200026,200027,200031,200044&_=${Date.now()}`;
+            const anueRes = await fetchWithTimeout(anueUrl, {
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                    'Referer': 'https://www.wantgoo.com/global',
                     'Cache-Control': 'no-cache'
                 }
-            });
+            }, 3500);
 
-            if (wgRes.ok) {
-                const wgData = await wgRes.json();
-                if (Array.isArray(wgData)) {
-                    // 優先找 WTX&(台指期) 或 WTXP&(台指期盤後/夜盤) 或 WTXM&(合併盤)
-                    const txItem = wgData.find(item => item.id === 'WTX&') ||
-                                   wgData.find(item => item.id === 'WTXP&') ||
-                                   wgData.find(item => item.id === 'WTXM&') ||
-                                   wgData.find(item => String(item.name || '').includes('台指期'));
-
-                    if (txItem) {
-                        const price = parseFloat(String(txItem.deal || txItem.price || '').replace(/,/g, ''));
-                        const change = parseFloat(String(txItem.change || '').replace(/,/g, ''));
-                        let pct = parseFloat(String(txItem.percentage || txItem.changeRate || '').replace(/,/g, '').replace(/%/g, ''));
-
-                        if (Number.isFinite(price) && price > 0) {
-                            if (!Number.isFinite(pct) && Number.isFinite(change)) {
-                                const prev = price - change;
-                                pct = prev > 0 ? (change / prev) * 100 : 0;
-                            }
-
-                            results["TX"] = {
-                                name: "台指期",
-                                price: price,
-                                change: Number.isFinite(change) ? change : 0,
-                                pct: Number.isFinite(pct) ? pct : 0,
-                                source: "Wantgoo"
-                            };
-                        }
-                    }
-                }
-            }
-        } catch (e) {
-            console.warn("Wantgoo 台指期抓取失敗:", e);
-        }
-    }
-
-    // 【順位 B】：鉅亨網 Anue 即時行情 API 備援
-    if (results["TX"].price === null) {
-        try {
-            const anueUrl = `https://ws.api.cnyes.com/ws/api/v1/quote/quotes/TFE:TXF00:FUTURE?column=200010,200026,200027,200031,200044&_=${Date.now()}`;
-            const anueRes = await fetch(anueUrl, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Cache-Control': 'no-cache'
-                }
-            });
+            console.log(`[TX:Anue] HTTP Status: ${anueRes.status}`);
 
             if (anueRes.ok) {
                 const anueJson = await anueRes.json();
-                const quote = anueJson?.data?.["TFE:TXF00:FUTURE"] || anueJson?.data?.[0];
-                if (quote) {
-                    const price = parseFloat(quote["200026"] || quote.price || 0);
-                    const change = parseFloat(quote["200027"] || quote.change || 0);
-                    const pct = parseFloat(quote["200044"] || quote.changePercent || 0);
+                const dataPayload = anueJson?.data;
 
-                    if (Number.isFinite(price) && price > 0) {
+                // 鉅亨網回傳可能是陣列或以代碼為 key 的物件
+                let quoteList = [];
+                if (Array.isArray(dataPayload)) {
+                    quoteList = dataPayload;
+                } else if (dataPayload && typeof dataPayload === 'object') {
+                    quoteList = Object.values(dataPayload);
+                }
+
+                for (const q of quoteList) {
+                    const p = parseFloat(q?.["200026"] || q?.price || 0);
+                    const c = parseFloat(q?.["200027"] || q?.change || 0);
+                    const pctVal = parseFloat(q?.["200044"] || q?.changePercent || 0);
+
+                    if (Number.isFinite(p) && p > 0) {
                         results["TX"] = {
                             name: "台指期",
-                            price: price,
-                            change: change,
-                            pct: pct,
+                            price: p,
+                            change: Number.isFinite(c) ? c : 0,
+                            pct: Number.isFinite(pctVal) ? pctVal : 0,
                             source: "Anue"
                         };
+                        console.log(`[TX:Anue] 成功取得報價 -> 價格: ${p}, 漲跌: ${c}, 漲幅: ${pctVal}%`);
+                        break;
                     }
                 }
             }
         } catch (e) {
-            console.warn("Anue 台指期抓取失敗:", e);
+            console.warn("[TX:Anue] 查詢失敗或逾時:", e.message || e);
         }
     }
 
-    // 【順位 C】：FinMind 期貨資料庫 (歷史收盤保底，無盤中跳動但保證有數值)
+    // 【來源 2：Yahoo 奇摩期貨即時端點備援 (日盤/夜盤)】
+    if (results["TX"].price === null) {
+        try {
+            const yUrl = `https://tw.stock.yahoo.com/_td-stock/api/resource/FuturesServices.futureIndexQuotes;symbol=WTX%26?_=${Date.now()}`;
+            const yRes = await fetchWithTimeout(yUrl, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                    'Cache-Control': 'no-cache'
+                }
+            }, 3500);
+
+            console.log(`[TX:YahooTW] HTTP Status: ${yRes.status}`);
+
+            if (yRes.ok) {
+                const yJson = await yRes.json();
+                const quoteObj = yJson?.data?.list?.[0] || yJson?.list?.[0] || yJson?.data;
+                const p = parseFloat(quoteObj?.price || quoteObj?.regularMarketPrice || 0);
+                const c = parseFloat(quoteObj?.change || 0);
+                const pctVal = parseFloat(quoteObj?.changePercent || quoteObj?.regularMarketChangePercent || 0);
+
+                if (Number.isFinite(p) && p > 0) {
+                    results["TX"] = {
+                        name: "台指期",
+                        price: p,
+                        change: Number.isFinite(c) ? c : 0,
+                        pct: Number.isFinite(pctVal) ? pctVal : 0,
+                        source: "YahooTW"
+                    };
+                    console.log(`[TX:YahooTW] 成功取得報價 -> 價格: ${p}, 漲跌: ${c}, 漲幅: ${pctVal}%`);
+                }
+            }
+        } catch (e) {
+            console.warn("[TX:YahooTW] 查詢失敗或逾時:", e.message || e);
+        }
+    }
+
+    // 【來源 3：FinMind 期貨資料庫 (歷史保底，無盤中跳動)】
     if (results["TX"].price === null) {
         try {
             const startDate = new Date(now.getTime() - 20 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
             const futUrl = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanFuturesDaily&data_id=TX&start_date=${startDate}&_=${Date.now()}`;
-            const futRes = await fetch(futUrl, { headers: { 'Cache-Control': 'no-cache' } });
+            const futRes = await fetchWithTimeout(futUrl, {
+                headers: { 'Cache-Control': 'no-cache' }
+            }, 3500);
+
+            console.log(`[TX:FinMind] HTTP Status: ${futRes.status}`);
 
             if (futRes.ok) {
                 const futJson = await futRes.json();
@@ -235,15 +262,16 @@ export async function onRequest(context) {
                             pct: pct,
                             source: "FinMind"
                         };
+                        console.log(`[TX:FinMind] 成功取得保底價格 -> 價格: ${price}`);
                     }
                 }
             }
         } catch (e) {
-            console.warn("FinMind TX 備援失敗:", e);
+            console.warn("[TX:FinMind] 備援查詢失敗:", e.message || e);
         }
     }
 
-    // 規範：若全部失敗回傳 null，前端渲染 --
+    // 嚴格規範：若所有來源皆失敗，回傳 null
     if (!results["TX"] || results["TX"].price === null) {
         results["TX"] = { name: "台指期", price: null, change: null, pct: null, source: null };
     }
