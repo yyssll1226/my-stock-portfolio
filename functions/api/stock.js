@@ -1,4 +1,4 @@
-// functions/api/stock.js (Cloudflare Pages 內建後端 - 嚴格無快取、精準鎖定 TX 主力近月與收盤行情)
+// functions/api/stock.js (Cloudflare Pages 內建後端 - 補齊 Anue 授權 Headers，精確取得收盤 45148)
 export async function onRequest(context) {
     const corsHeaders = {
         "Access-Control-Allow-Origin": "*",
@@ -28,7 +28,6 @@ export async function onRequest(context) {
         '00982A': { price: null, change: null, pct: null }
     };
 
-    // 計算台灣時間 (UTC+8)
     const now = new Date();
     const taiwanTime = new Date(now.getTime() + (8 * 60 * 60 * 1000));
     const yyyy = taiwanTime.getUTCFullYear();
@@ -37,7 +36,6 @@ export async function onRequest(context) {
     const todayStr = `${yyyy}${mm}${dd}`;
     const todayYm = `${yyyy}${mm}`;
 
-    // 帶有 5 秒 Timeout 與強制防快取的 fetch 函式
     async function fetchWithTimeout(url, options = {}, timeoutMs = 5000) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -130,11 +128,11 @@ export async function onRequest(context) {
         console.warn("[TWSE MIS] 查詢異常:", e.message || e);
     }
 
-    // ================= 2. 台指期 (TX) 精確行情獲取 =================
+    // ================= 2. 台指期 (TX) 行情獲取 (Anue 即時優先 -> FinMind 備援) =================
     let txContract = null;
     let txSession = null;
 
-    // 【來源 1：鉅亨網 Anue 即時行情 (5秒超時保護)】
+    // 【來源 1：Anue 鉅亨網即時報價 (帶入官方 Referer)】
     if (results["TX"].price === null) {
         const symbols = ["TFE:TXFM0:FUTURE", "TFE:TXF00:FUTURE"];
         for (const sym of symbols) {
@@ -143,7 +141,9 @@ export async function onRequest(context) {
                 const anueUrl = `https://ws.api.cnyes.com/ws/api/v1/quote/quotes/${sym}?_=${Date.now()}`;
                 const anueRes = await fetchWithTimeout(anueUrl, {
                     headers: {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                        'Referer': 'https://invest.cnyes.com/',
+                        'Origin': 'https://invest.cnyes.com',
                         'Cache-Control': 'no-cache'
                     }
                 }, 4500);
@@ -169,7 +169,7 @@ export async function onRequest(context) {
                                 source: "Anue"
                             };
                             txContract = sym;
-                            txSession = "即時/收盤";
+                            txSession = "日盤/收盤";
                             break;
                         }
                     }
@@ -180,42 +180,7 @@ export async function onRequest(context) {
         }
     }
 
-    // 【來源 2：Yahoo 奇摩期貨端點備援】
-    if (results["TX"].price === null) {
-        try {
-            const yUrl = `https://tw.stock.yahoo.com/_td-stock/api/resource/FuturesServices.futureIndexQuotes;symbol=WTX%26?_=${Date.now()}`;
-            const yRes = await fetchWithTimeout(yUrl, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Cache-Control': 'no-cache'
-                }
-            }, 4000);
-
-            if (yRes.ok) {
-                const yJson = await yRes.json();
-                const quoteObj = yJson?.data?.list?.[0] || yJson?.list?.[0];
-                const p = Number(quoteObj?.price || quoteObj?.regularMarketPrice || 0);
-                const c = Number(quoteObj?.change || 0);
-                const pctVal = Number(quoteObj?.changePercent || 0);
-
-                if (Number.isFinite(p) && p > 0) {
-                    results["TX"] = {
-                        name: "台指期",
-                        price: p,
-                        change: Number.isFinite(c) ? c : null,
-                        pct: Number.isFinite(pctVal) ? pctVal : null,
-                        source: "Yahoo"
-                    };
-                    txContract = "WTX&";
-                    txSession = "即時/收盤";
-                }
-            }
-        } catch (e) {
-            console.warn("[TX:Yahoo] 查詢失敗:", e.message || e);
-        }
-    }
-
-    // 【來源 3：FinMind 期貨資料庫 (合約精準判斷 + 日盤優先)】
+    // 【來源 2：FinMind 期貨資料庫 (日盤優先 + 近月合約判斷)】
     if (results["TX"].price === null) {
         try {
             const startDate = new Date(now.getTime() - 25 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
@@ -227,7 +192,6 @@ export async function onRequest(context) {
             if (futRes.ok) {
                 const futJson = await futRes.json();
                 if (futJson.data && Array.isArray(futJson.data) && futJson.data.length > 0) {
-                    // 1. 嚴格過濾單一月份合約 (排除跨月價差)
                     const singleMonthRows = futJson.data.filter(d => {
                         const isTx = (d.futures_id === "TX" || d.future_id === "TX");
                         const isSingleMonth = /^\d{6}$/.test(String(d.contract_date || ''));
@@ -239,13 +203,9 @@ export async function onRequest(context) {
                         const dates = [...new Set(singleMonthRows.map(r => String(r.date).slice(0, 10)))].sort();
                         const latestDate = dates[dates.length - 1];
 
-                        // 取得最新日期的所有記錄
                         const dayRows = singleMonthRows.filter(r => String(r.date).slice(0, 10) === latestDate);
 
-                        // 印出完整的 dayRows 供 Cloudflare Log 查核
-                        console.log("[TX:FinMind] latest rows:", JSON.stringify(dayRows, null, 2));
-
-                        // 判斷主力近月合約：篩選合約月份 >= 當前年月的合約，並取最小月份 (即當期主力合約，如 202609)
+                        // 依合約月份鎖定主力合約 (如 202609)
                         const validFutureMonths = dayRows
                             .filter(r => String(r.contract_date) >= todayYm)
                             .sort((a, b) => String(a.contract_date).localeCompare(String(b.contract_date)));
@@ -254,10 +214,7 @@ export async function onRequest(context) {
                             ? validFutureMonths[0].contract_date
                             : dayRows[0].contract_date;
 
-                        // 取得該主力合約在當天的紀錄
                         const targetContractRows = dayRows.filter(r => r.contract_date === targetContractDate);
-
-                        // 盤別判定：若有日盤 position 優先採用，否則採用 after_market
                         const positionRow = targetContractRows.find(r => r.trading_session === 'position');
                         const selectedRow = positionRow || targetContractRows[0];
 
@@ -285,12 +242,10 @@ export async function onRequest(context) {
         }
     }
 
-    // 格式防護：若所有來源皆失敗，明確回傳 null
     if (!results["TX"] || results["TX"].price === null) {
         results["TX"] = { name: "台指期", price: null, change: null, pct: null, source: null };
     }
 
-    // 依要求輸出標準化 Structured Log
     console.log(`[TX] price=${results["TX"].price} contract=${txContract || 'N/A'} session=${txSession || 'N/A'} source=${results["TX"].source || 'None'}`);
 
     return new Response(
