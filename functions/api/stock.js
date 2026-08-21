@@ -1,4 +1,4 @@
-// functions/api/stock.js (Cloudflare Pages 內建後端 - 補齊 Anue 授權 Headers，精確取得收盤 45148)
+// functions/api/stock.js (Cloudflare Pages 內建後端 - 多重即時行情鏈，精確取得 TX 45148)
 export async function onRequest(context) {
     const corsHeaders = {
         "Access-Control-Allow-Origin": "*",
@@ -36,7 +36,7 @@ export async function onRequest(context) {
     const todayStr = `${yyyy}${mm}${dd}`;
     const todayYm = `${yyyy}${mm}`;
 
-    async function fetchWithTimeout(url, options = {}, timeoutMs = 5000) {
+    async function fetchWithTimeout(url, options = {}, timeoutMs = 4500) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
         try {
@@ -128,25 +128,22 @@ export async function onRequest(context) {
         console.warn("[TWSE MIS] 查詢異常:", e.message || e);
     }
 
-    // ================= 2. 台指期 (TX) 行情獲取 (Anue 即時優先 -> FinMind 備援) =================
-    let txContract = null;
-    let txSession = null;
+    // ================= 2. 台指期 (TX) 即時與日盤收盤獲取 =================
 
-    // 【來源 1：Anue 鉅亨網即時報價 (帶入官方 Referer)】
+    // 【來源 1：鉅亨網 Anue 即時報價 (標準 FORMAT 參數)】
     if (results["TX"].price === null) {
-        const symbols = ["TFE:TXFM0:FUTURE", "TFE:TXF00:FUTURE"];
+        const symbols = ["TFE:TXF00:FUTURE", "TFE:TXFM0:FUTURE"];
         for (const sym of symbols) {
             if (results["TX"].price !== null) break;
             try {
-                const anueUrl = `https://ws.api.cnyes.com/ws/api/v1/quote/quotes/${sym}?_=${Date.now()}`;
+                const anueUrl = `https://ws.api.cnyes.com/ws/api/v1/quote/quotes/${sym}?column=FORMAT&_=${Date.now()}`;
                 const anueRes = await fetchWithTimeout(anueUrl, {
                     headers: {
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
                         'Referer': 'https://invest.cnyes.com/',
-                        'Origin': 'https://invest.cnyes.com',
                         'Cache-Control': 'no-cache'
                     }
-                }, 4500);
+                }, 4000);
 
                 if (anueRes.ok) {
                     const anueJson = await anueRes.json();
@@ -168,8 +165,6 @@ export async function onRequest(context) {
                                 pct: Number.isFinite(pctVal) ? pctVal : null,
                                 source: "Anue"
                             };
-                            txContract = sym;
-                            txSession = "日盤/收盤";
                             break;
                         }
                     }
@@ -180,7 +175,94 @@ export async function onRequest(context) {
         }
     }
 
-    // 【來源 2：FinMind 期貨資料庫 (日盤優先 + 近月合約判斷)】
+    // 【來源 2：臺灣期貨交易所 TAIFEX 官方 OpenAPI】
+    if (results["TX"].price === null) {
+        try {
+            const taifexUrl = `https://openapi.taifex.com.tw/v1/DailyMarketReportFut?_=${Date.now()}`;
+            const taifexRes = await fetchWithTimeout(taifexUrl, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Cache-Control': 'no-cache'
+                }
+            }, 4500);
+
+            if (taifexRes.ok) {
+                const list = await taifexRes.json();
+                if (Array.isArray(list) && list.length > 0) {
+                    // 過濾 TX 單月合約，排除價差
+                    const txRows = list.filter(item => {
+                        const isTx = String(item.Contract || item.futures_id || '').toUpperCase() === 'TX';
+                        const month = String(item["ContractMonth(Week)"] || item.contract_date || '').trim();
+                        const isSingleMonth = /^\d{6}$/.test(month);
+                        const p = Number(item.Close || item.close || 0);
+                        return isTx && isSingleMonth && p > 0;
+                    });
+
+                    if (txRows.length > 0) {
+                        // 優先挑選日盤(position/一般交易時段)
+                        const posRows = txRows.filter(r => String(r.TradingSession || '').toLowerCase().includes('position') || String(r.TradingSession || '') === '0' || String(r.TradingSession || '') === '');
+                        const targetRows = posRows.length > 0 ? posRows : txRows;
+
+                        // 依合約月份取近月主力 (如 202609)
+                        targetRows.sort((a, b) => String(a["ContractMonth(Week)"] || a.contract_date).localeCompare(String(b["ContractMonth(Week)"] || b.contract_date)));
+                        const front = targetRows.find(r => String(r["ContractMonth(Week)"] || r.contract_date) >= todayYm) || targetRows[0];
+
+                        const p = Number(front.Close || front.close);
+                        const refP = Number(front.SettlementPrice || front.settlement_price || p);
+                        const c = p - refP;
+                        const pctVal = refP > 0 ? (c / refP) * 100 : 0;
+
+                        if (Number.isFinite(p) && p > 0) {
+                            results["TX"] = {
+                                name: "台指期",
+                                price: p,
+                                change: Number.isFinite(c) ? c : null,
+                                pct: Number.isFinite(pctVal) ? pctVal : null,
+                                source: "TAIFEX OpenAPI"
+                            };
+                        }
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn("[TX:TAIFEX] 查詢失敗:", e.message || e);
+        }
+    }
+
+    // 【來源 3：Yahoo 奇摩期貨備援】
+    if (results["TX"].price === null) {
+        try {
+            const yUrl = `https://tw.stock.yahoo.com/_td-stock/api/resource/FuturesServices.futureIndexQuotes;symbol=WTX%26?_=${Date.now()}`;
+            const yRes = await fetchWithTimeout(yUrl, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Cache-Control': 'no-cache'
+                }
+            }, 4000);
+
+            if (yRes.ok) {
+                const yJson = await yRes.json();
+                const quoteObj = yJson?.data?.list?.[0] || yJson?.list?.[0];
+                const p = Number(quoteObj?.price || quoteObj?.regularMarketPrice || 0);
+                const c = Number(quoteObj?.change || 0);
+                const pctVal = Number(quoteObj?.changePercent || 0);
+
+                if (Number.isFinite(p) && p > 0) {
+                    results["TX"] = {
+                        name: "台指期",
+                        price: p,
+                        change: Number.isFinite(c) ? c : null,
+                        pct: Number.isFinite(pctVal) ? pctVal : null,
+                        source: "Yahoo"
+                    };
+                }
+            }
+        } catch (e) {
+            console.warn("[TX:Yahoo] 查詢失敗:", e.message || e);
+        }
+    }
+
+    // 【來源 4：FinMind 期貨資料庫 (最後保底)】
     if (results["TX"].price === null) {
         try {
             const startDate = new Date(now.getTime() - 25 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
@@ -202,10 +284,8 @@ export async function onRequest(context) {
                     if (singleMonthRows.length > 0) {
                         const dates = [...new Set(singleMonthRows.map(r => String(r.date).slice(0, 10)))].sort();
                         const latestDate = dates[dates.length - 1];
-
                         const dayRows = singleMonthRows.filter(r => String(r.date).slice(0, 10) === latestDate);
 
-                        // 依合約月份鎖定主力合約 (如 202609)
                         const validFutureMonths = dayRows
                             .filter(r => String(r.contract_date) >= todayYm)
                             .sort((a, b) => String(a.contract_date).localeCompare(String(b.contract_date)));
@@ -231,8 +311,6 @@ export async function onRequest(context) {
                                 pct: pctVal,
                                 source: `FinMind (${selectedRow.contract_date} ${session})`
                             };
-                            txContract = selectedRow.contract_date;
-                            txSession = session;
                         }
                     }
                 }
@@ -245,8 +323,6 @@ export async function onRequest(context) {
     if (!results["TX"] || results["TX"].price === null) {
         results["TX"] = { name: "台指期", price: null, change: null, pct: null, source: null };
     }
-
-    console.log(`[TX] price=${results["TX"].price} contract=${txContract || 'N/A'} session=${txSession || 'N/A'} source=${results["TX"].source || 'None'}`);
 
     return new Response(
         JSON.stringify({
