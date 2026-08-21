@@ -1,4 +1,4 @@
-// functions/api/stock.js (Cloudflare Pages 內建後端 - 最終正式版：100% 對接驗證成功的行情引擎)
+// functions/api/stock.js (Cloudflare Pages 內建後端 - 精準修正 TX 日盤 45148 與夜盤時段判斷)
 export async function onRequest(context) {
     const corsHeaders = {
         "Access-Control-Allow-Origin": "*",
@@ -35,7 +35,6 @@ export async function onRequest(context) {
     const dd = String(taiwanTime.getUTCDate()).padStart(2, '0');
     const todayStr = `${yyyy}${mm}${dd}`;
 
-    // 安全帶有 Timeout 的 Fetch
     async function fetchWithTimeout(url, options = {}, timeoutMs = 3500) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -130,24 +129,28 @@ export async function onRequest(context) {
 
     // ================= 2. 台指期 (TX) 行情獲取 =================
 
-    // 【來源 1】嘗試 Anue 即時行情
+    // 【來源 1】鉅亨網 Anue 即時報價 (盤中最新日盤與即時行情)
     if (results["TX"].price === null) {
         try {
-            const anueUrl = `https://ws.api.cnyes.com/ws/api/v1/quote/quotes/TFE:TXFM0:FUTURE,TFE:TXF00:FUTURE?column=200010,200026,200027,200031,200044&_=${Date.now()}`;
+            const anueUrl = `https://ws.api.cnyes.com/ws/api/v1/quote/quotes/TFE:TXFM0:FUTURE,TFE:TXF00:FUTURE?_=${Date.now()}`;
             const anueRes = await fetchWithTimeout(anueUrl, {
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                     'Cache-Control': 'no-cache'
                 }
-            }, 2500);
+            }, 3000);
 
             if (anueRes.ok) {
                 const anueJson = await anueRes.json();
-                const list = Array.isArray(anueJson?.data) ? anueJson.data : Object.values(anueJson?.data || {});
-                for (const q of list) {
-                    const p = parseFloat(q?.["200026"] || q?.price || 0);
-                    const c = parseFloat(q?.["200027"] || q?.change || 0);
-                    const pctVal = parseFloat(q?.["200044"] || q?.changePercent || 0);
+                let rawList = [];
+                if (Array.isArray(anueJson?.data)) rawList = anueJson.data;
+                else if (anueJson?.data && typeof anueJson.data === 'object') rawList = Object.values(anueJson.data);
+
+                for (const q of rawList) {
+                    // 鉅亨網報價可能為數字或字串，容錯轉型
+                    const p = Number(q?.["200026"] ?? q?.price ?? q?.close ?? 0);
+                    const c = Number(q?.["200027"] ?? q?.change ?? 0);
+                    const pctVal = Number(q?.["200044"] ?? q?.changePercent ?? 0);
 
                     if (Number.isFinite(p) && p > 0) {
                         results["TX"] = {
@@ -162,11 +165,11 @@ export async function onRequest(context) {
                 }
             }
         } catch (e) {
-            // Anue 逾時或阻擋時靜默切換至下一步
+            // Anue 異常時靜默切換
         }
     }
 
-    // 【來源 2】嘗試 Yahoo 奇摩期貨即時端點
+    // 【來源 2】Yahoo 奇摩期貨即時端點
     if (results["TX"].price === null) {
         try {
             const yUrl = `https://tw.stock.yahoo.com/_td-stock/api/resource/FuturesServices.futureIndexQuotes;symbol=WTX%26?_=${Date.now()}`;
@@ -175,14 +178,14 @@ export async function onRequest(context) {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                     'Cache-Control': 'no-cache'
                 }
-            }, 2500);
+            }, 3000);
 
             if (yRes.ok) {
                 const yJson = await yRes.json();
                 const quoteObj = yJson?.data?.list?.[0] || yJson?.list?.[0];
-                const p = parseFloat(quoteObj?.price || 0);
-                const c = parseFloat(quoteObj?.change || 0);
-                const pctVal = parseFloat(quoteObj?.changePercent || 0);
+                const p = Number(quoteObj?.price || quoteObj?.regularMarketPrice || 0);
+                const c = Number(quoteObj?.change || 0);
+                const pctVal = Number(quoteObj?.changePercent || 0);
 
                 if (Number.isFinite(p) && p > 0) {
                     results["TX"] = {
@@ -199,7 +202,7 @@ export async function onRequest(context) {
         }
     }
 
-    // 【來源 3】FinMind 期貨資料庫 (精準主力合約解析引擎 - 100% 成功保底)
+    // 【來源 3】FinMind 期貨資料庫 (日盤優先 + 主力合約判斷)
     if (results["TX"].price === null) {
         try {
             const startDate = new Date(now.getTime() - 25 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
@@ -211,7 +214,7 @@ export async function onRequest(context) {
             if (futRes.ok) {
                 const futJson = await futRes.json();
                 if (futJson.data && Array.isArray(futJson.data) && futJson.data.length > 0) {
-                    // 1. 過濾出 TX 單一月份合約 (排除跨月價差如 202608/202609)
+                    // 1. 過濾單月份合約
                     const singleMonthRows = futJson.data.filter(d => {
                         const isTx = (d.futures_id === "TX" || d.future_id === "TX");
                         const isSingleMonth = /^\d{6}$/.test(String(d.contract_date || ''));
@@ -220,16 +223,21 @@ export async function onRequest(context) {
                     });
 
                     if (singleMonthRows.length > 0) {
-                        // 2. 取得資料庫中最新的一個日期
                         const dates = [...new Set(singleMonthRows.map(r => String(r.date).slice(0, 10)))].sort();
                         const latestDate = dates[dates.length - 1];
 
-                        // 3. 找出該最新日期的所有合約列
-                        const latestDayRows = singleMonthRows.filter(r => String(r.date).slice(0, 10) === latestDate);
+                        // 取得最新日期的所有記錄
+                        let dayRows = singleMonthRows.filter(r => String(r.date).slice(0, 10) === latestDate);
 
-                        // 4. 依照成交量 (volume) 降序排序，成交量最大者即為當前主力合約！
-                        latestDayRows.sort((a, b) => (Number(b.volume) || 0) - (Number(a.volume) || 0));
-                        const activeContract = latestDayRows[0];
+                        // 若當天有日盤(position)，優先挑選日盤；否則才採用夜盤(after_market)
+                        const positionRows = dayRows.filter(r => r.trading_session === 'position');
+                        if (positionRows.length > 0) {
+                            dayRows = positionRows;
+                        }
+
+                        // 依成交量排序挑選主力合約
+                        dayRows.sort((a, b) => (Number(b.volume) || 0) - (Number(a.volume) || 0));
+                        const activeContract = dayRows[0];
 
                         if (activeContract && Number(activeContract.close) > 0) {
                             const p = Number(activeContract.close);
@@ -253,7 +261,6 @@ export async function onRequest(context) {
         }
     }
 
-    // 嚴格規範：若所有來源皆無資料，回傳 null (前端顯示 --)
     if (!results["TX"] || results["TX"].price === null) {
         results["TX"] = { name: "台指期", price: null, change: null, pct: null, source: null };
     }
