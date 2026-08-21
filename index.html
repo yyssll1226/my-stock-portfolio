@@ -2,14 +2,21 @@
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>持股管理系統</title>
+    <!-- 手機端防縮放設定 (禁止點兩下放大縮小) -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no">
+    <title>木火月證券</title>
+    
+    <!-- 電腦版 Favicon 圖示 -->
+    <link rel="icon" href="/icon.png" type="image/png">
+    <link rel="shortcut icon" href="/icon.png" type="image/png">
+    
     <!-- iPhone 全螢幕 App 擬真設定 -->
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
-    <meta name="apple-mobile-web-app-title" content="持股管理系統">
-    <!-- 讀取你自己的照片 icon.png -->
+    <meta name="apple-mobile-web-app-title" content="木火月證券">
+    <!-- iPhone 桌面圖示 -->
     <link rel="apple-touch-icon" href="/icon.png">
+    
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- html2pdf.js CDN -->
@@ -19,6 +26,13 @@
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+
+    <style>
+        /* 徹底禁止行動裝置雙擊放大延遲與手勢縮放 */
+        * {
+            touch-action: manipulation;
+        }
+    </style>
 
     <script>
         tailwind.config = {
@@ -42,13 +56,13 @@
         }
     </script>
 </head>
-<body class="bg-purpleTheme-50 text-gray-800 min-h-screen p-4 md:p-6">
+<body class="bg-purpleTheme-50 text-gray-800 min-h-screen p-4 md:p-6 select-none">
 
     <div class="max-w-6xl mx-auto space-y-6">
         
         <!-- 標頭資訊 -->
         <header class="bg-white rounded-xl shadow-sm p-6 border border-purpleTheme-100 flex flex-col items-center gap-4">
-            <h1 class="text-3xl font-bold text-purpleTheme-900 text-center tracking-wide">持股管理系統</h1>
+            <h1 class="text-3xl font-bold text-purpleTheme-900 text-center tracking-wide">木火月證券</h1>
             
             <div class="flex flex-wrap gap-3 justify-center items-center">
                 <!-- 登入狀態顯示區域 -->
@@ -291,11 +305,11 @@
                 </div>
             </div>
 
-            <!-- 第二行：三檔自選 ETF -->
+            <!-- 第二行：三檔自選 ETF (名稱已簡化為「自選 ETF」) -->
             <div>
                 <h3 class="text-sm font-bold text-purpleTheme-900 mb-3 flex items-center gap-2">
                     <span class="w-2 h-2 rounded-full bg-purpleTheme-600 inline-block"></span>
-                    自選 ETF 標的
+                    自選 ETF
                 </h3>
                 <div class="grid grid-cols-1 sm:grid-cols-3 gap-4" id="etf-cards">
                     <!-- JS 動態渲染 ETF 行情 -->
@@ -473,7 +487,7 @@
             '00982A': '主動群益台灣強棒'
         };
 
-        // 初始狀態：預設全為 null，未取得成功前堅持顯示 --，絕不呈現任何假數字
+        // 初始狀態：預設為 null，未取得前呈現 --
         let stockPrices = {
             '00980A': { price: null, change: null, pct: null },
             '00981A': { price: null, change: null, pct: null },
@@ -525,7 +539,6 @@
             }
         }
 
-        // 核心：呼叫同網域 Pages 內建微後端 /api/stock (完全沒有跨域 CORS 問題)
         async function fetchAllMarketData() {
             try {
                 const res = await fetch('/api/stock', { cache: 'no-store' });
@@ -634,6 +647,7 @@
             }
         }
 
+        // 提交交易紀錄：儲存後保留表單內容不清除 (重新整理或開關網頁時才會回歸最初預設)
         function handleFormSubmit(e) {
             e.preventDefault();
             const editId = document.getElementById('edit-id').value;
@@ -682,10 +696,15 @@
 
             saveLocalData();
             saveCloudData();
-            resetForm();
+            
+            // 僅重設編輯狀態為新增模式，保留使用者剛才輸入的數字與欄位內容
+            document.getElementById('edit-id').value = '';
+            document.getElementById('form-title').innerText = '新增交易紀錄';
+
             renderAll();
         }
 
+        // 手動點擊「清空/取消」按鈕時才執行清除
         function resetForm() {
             document.getElementById('trade-form').reset();
             document.getElementById('edit-id').value = '';
